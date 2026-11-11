@@ -174,7 +174,7 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: '1'
-          MICDROP_DESKTOP_PREVIEW_DIR: build/macos-desktop-preview
+          MICDROP_DESKTOP_PREVIEW_DIR: ${{ github.workspace }}/build/macos-desktop-preview
         run: go test -count=1 -v ./internal/desktop
       - name: Retain macOS desktop UI preview
         if: runner.os == 'macOS'
@@ -263,66 +263,72 @@ jobs:
           export PULSE_SERVER="unix:$PA_DIR/runtime/native"
           PA_PID=""
           cleanup_pulse() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ -f "$PA_DIR/pulse.log" ]; then
+              cat "$PA_DIR/pulse.log" >&2 || true
+            fi
             if [ -n "$PA_PID" ]; then
               kill "$PA_PID" >/dev/null 2>&1 || true
+              for _ in $(seq 1 10); do
+                kill -0 "$PA_PID" 2>/dev/null || break
+                sleep 0.1
+              done
+              kill -9 "$PA_PID" >/dev/null 2>&1 || true
               wait "$PA_PID" >/dev/null 2>&1 || true
             fi
           }
           trap cleanup_pulse EXIT
-          pulseaudio --daemonize=no --disallow-exit --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
+          pulseaudio --daemonize=no --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
             -L "module-native-protocol-unix auth-anonymous=1 socket=$PA_DIR/runtime/native" \
             -L "module-null-sink sink_name=MicDropDesktop rate=48000 channels=2 sink_properties=device.description=MicDrop_Desktop" \
             -L "module-null-sink sink_name=MicDropCable rate=48000 channels=2 sink_properties=device.description=MicDrop_Cable" \
-            -L "module-remap-source source_name=MicDropVirtualMic master=MicDropCable.monitor source_properties=device.description=MicDrop_Virtual_Mic" &
+            -L "module-remap-source source_name=MicDropVirtualMic master=MicDropCable.monitor source_properties=device.description=MicDrop_Virtual_Mic" \
+            </dev/null >/dev/null 2>&1 &
           PA_PID=$!
           for _ in $(seq 1 50); do
-            if [ -S "$PA_DIR/runtime/native" ] && pactl info >/dev/null 2>&1; then
+            if [ -S "$PA_DIR/runtime/native" ] && timeout 3s pactl info >/dev/null 2>&1; then
               break
             fi
             if ! kill -0 "$PA_PID" 2>/dev/null; then
-              cat "$PA_DIR/pulse.log" >&2 || true
               exit 1
             fi
             sleep 0.1
           done
-          if ! pactl info >/dev/null 2>&1; then
-            cat "$PA_DIR/pulse.log" >&2 || true
-            exit 1
-          fi
-          pactl set-default-sink MicDropDesktop
-          pactl set-default-source MicDropVirtualMic
+          timeout 5s pactl info >/dev/null
+          timeout 5s pactl set-default-sink MicDropDesktop
+          timeout 5s pactl set-default-source MicDropVirtualMic
 
           mkdir -p build/linux-audio-check
-          ./build/host/micdrop-host devices > build/linux-audio-check/devices.json
-          ./build/host/micdrop-host bridge-devices > build/linux-audio-check/bridge-devices.json
+          timeout 10s ./build/host/micdrop-host devices > build/linux-audio-check/devices.json
+          timeout 10s ./build/host/micdrop-host bridge-devices > build/linux-audio-check/bridge-devices.json
 
           # Missing explicit endpoints must fail closed rather than falling back to default.
-          if ./build/host/micdrop-host capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
+          if timeout 10s ./build/host/micdrop-host capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
             echo "Expected missing explicit sink to fail closed" >&2
             exit 1
           fi
 
           # Simultaneously inject synthetic stereo tone into MicDropCable and capture from its monitor.
-          ./build/host/micdrop-host capture \
+          timeout 15s ./build/host/micdrop-host capture \
             --device MicDropCable \
             --duration 2500ms \
             --output build/linux-audio-check/cable-loopback.wav \
             > build/linux-audio-check/capture-cable.json &
           CAP_PID=$!
           sleep 0.1
-          ./build/host/micdrop-host bridge-check \
+          timeout 15s ./build/host/micdrop-host bridge-check \
             --render-device MicDropCable \
             --duration 2500ms \
             > build/linux-audio-check/bridge-cable.json
           wait "$CAP_PID"
 
           # Verify default output sink resolution (no --device flag) with live audio.
-          ./build/host/micdrop-host capture \
+          timeout 15s ./build/host/micdrop-host capture \
             --duration 2500ms \
             > build/linux-audio-check/capture-default.json &
           DEF_PID=$!
           sleep 0.1
-          ./build/host/micdrop-host bridge-check \
+          timeout 15s ./build/host/micdrop-host bridge-check \
             --render-device MicDropDesktop \
             --duration 2500ms \
             > build/linux-audio-check/bridge-default.json
