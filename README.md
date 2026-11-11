@@ -29,8 +29,8 @@ Download matching Windows and phone packages from the latest release on the
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| **Windows 11 (x64)** | `MicDrop-Setup-*-windows-x64.exe` or `MicDrop-*-windows-x64.zip` | Per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
-| **Android 12+ (arm64)** | `MicDrop-*-android-arm64.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
+| **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
+| **Android 12+ (arm64)** | `MicDrop-*-android-arm64-dev.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
 | **iPhone (iOS 17+ arm64)** | `MicDrop-*-ios-arm64-unsigned.ipa` | Sideload with your Apple ID via AltStore, SideStore, Sideloadly, or Xcode ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
 | **Linux (optional)** | Built from source / CI artifact | Self-hosted remote rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
 
