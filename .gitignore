@@ -1,0 +1,55 @@
+# Local build and editor output
+build/
+out/
+.gradle/
+.cxx/
+.idea/
+.vs/
+local.properties
+*.user
+*.suo
+*.iml
+
+# Machine-local state, secrets, and private diagnostics
+.env
+.env.*
+!.env.example
+.local/
+secrets/
+recordings/
+diagnostics-private/
+rendezvous-private/
+*.keystore
+*.jks
+*.pfx
+*.p12
+*.dpapi
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+
+# Generated synthetic test audio
+*.wav
+.deps/
+__pycache__/
+.venv/
+
+# iPhone build output and Apple signing material
+apps/ios/MicDrop.xcodeproj/
+.build/
+.swiftpm/
+xcuserdata/
+DerivedData/
+*.ipa
+*.xcarchive/
+*.mobileprovision
+*.p8
+# MicDropKit's Build source directories are not build output; on case-insensitive
+# checkouts (Windows, macOS) the build/ rule above would otherwise hide them.
+!apps/ios/MicDropKit/Sources/MicDropCore/Build/
+!apps/ios/MicDropKit/Tests/MicDropCoreTests/Build/
+
+# Compiled Windows application manifest
+apps/windows-host/desktop_windows_amd64.syso
+internal/desktop/desktop_test_windows_amd64.syso

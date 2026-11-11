@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.22)
+project(MicDrop VERSION 0.1.0 LANGUAGES C CXX)
+
+option(MICDROP_BUILD_TESTS "Build host-native contract tests" ON)
+option(MICDROP_BUILD_RTC "Build the pinned native WebRTC Windows DLL" OFF)
+if(MICDROP_BUILD_TESTS AND NOT ANDROID)
+  enable_testing()
+endif()
+if(MICDROP_BUILD_RTC AND MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
+add_subdirectory(native/media)
+if(NOT ANDROID)
+  add_subdirectory(native/platform/windows)
+endif()
+
+if(MICDROP_BUILD_RTC)
+  add_subdirectory(native/rtc)
+endif()
+
+if(MICDROP_BUILD_TESTS AND NOT ANDROID)
+  add_subdirectory(tests/native)
+endif()

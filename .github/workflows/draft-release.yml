@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Assemble draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful main-branch Build and audio contracts run ID (with retained release bundles)
+        required: true
+        type: string
+      ios_run_id:
+        description: Optional successful main-branch iPhone app run ID for the same source commit
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: micdrop-draft-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      release_id: ${{ steps.prepare.outputs.release_id }}
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      run_attempt: ${{ steps.prepare.outputs.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate successful source build and create or resume its draft
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: python3 tools/draft_release.py prepare --run-id "$BUILD_RUN_ID"
+
+  packages:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-2022
+          - platform: android
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Ensure Android build-tools 35.0.0
+        if: matrix.platform == 'android'
+        run: |
+          if [ ! -x "$ANDROID_HOME/build-tools/35.0.0/apksigner" ] || [ ! -x "$ANDROID_HOME/build-tools/35.0.0/aapt2" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0"
+          fi
+      - name: Prepare retained artifact directory
+        id: paths
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RUN_ATTEMPT: ${{ needs.prepare.outputs.run_attempt }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]).parent / "micdrop-artifacts" / os.environ["GITHUB_REPOSITORY_ID"]
+          suffix = f"{os.environ['BUILD_RUN_ID']}-{os.environ['RUN_ATTEMPT']}"
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as out:
+              out.write(f"harness={(root / 'windows-x64-harness' / suffix).as_posix()}\n")
+              out.write(f"installer={(root / 'windows-x64-installer' / suffix).as_posix()}\n")
+              out.write(f"android={(root / 'android-apk' / suffix).as_posix()}\n")
+          PY
+      - name: Download retained Windows harness bundle
+        if: matrix.platform == 'windows'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-harness-retained
+          path: ${{ steps.paths.outputs.harness }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download retained Windows installer bundle
+        if: matrix.platform == 'windows'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-installer-retained
+          path: ${{ steps.paths.outputs.installer }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download retained Android APK bundle
+        if: matrix.platform == 'android'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-apk-retained
+          path: ${{ steps.paths.outputs.android }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify retained packages and upload directly to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+        run: python tools/draft_release.py upload --run-id "$BUILD_RUN_ID" --release-id "$RELEASE_ID" --platform "$PACKAGE_PLATFORM"
+      - name: Validate optional iPhone build run
+        id: ios_meta
+        if: matrix.platform == 'android' && inputs.ios_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IOS_RUN_ID: ${{ inputs.ios_run_id }}
+          EXPECTED_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, "tools")
+          import draft_release as dr
+          ios_run_id = os.environ["IOS_RUN_ID"].strip()
+          if not ios_run_id.isdecimal() or int(ios_run_id) <= 0:
+              raise SystemExit("iOS run ID must be a positive number")
+          api = dr.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
+          run = api.request("GET", f"/actions/runs/{ios_run_id}")
+          if (not run or run.get("status") != "completed" or run.get("conclusion") != "success"
+                  or run.get("event") not in {"push", "workflow_dispatch"}
+                  or run.get("head_branch") != "main"
+                  or run.get("path") != ".github/workflows/ios.yml"
+                  or run.get("head_repository", {}).get("full_name") != api.repository
+                  or run.get("head_sha") != os.environ["EXPECTED_SHA"]):
+              raise SystemExit("Select a successful main-branch iPhone app run for the same source commit")
+          dest = dr.artifact_root() / "ios-ipa" / f"{run['id']}-{run['run_attempt']}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"ios_attempt={run['run_attempt']}\nios_dest={dest.as_posix()}\n")
+          PY
+      - name: Download retained iPhone IPA bundle
+        if: matrix.platform == 'android' && inputs.ios_run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ios-ipa-retained
+          path: ${{ steps.ios_meta.outputs.ios_dest }}
+          run-id: ${{ inputs.ios_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify retained iPhone IPA and upload directly to the draft
+        if: matrix.platform == 'android' && inputs.ios_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          IOS_RUN_ID: ${{ inputs.ios_run_id }}
+          IOS_ATTEMPT: ${{ steps.ios_meta.outputs.ios_attempt }}
+          EXPECTED_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        run: |
+          ipa_path="$(python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, "tools")
+          import draft_release as dr
+          files = dr.retained(dr.artifact_root(), "ios-ipa", os.environ["IOS_RUN_ID"].strip(),
+                              os.environ["IOS_ATTEMPT"], os.environ["EXPECTED_SHA"])
+          print(files["MicDrop.ipa"])
+          PY
+          )"
+          python3 tools/draft_release.py upload --run-id "$BUILD_RUN_ID" --release-id "$RELEASE_ID" \
+            --platform ios --ios-ipa "$ipa_path" --output build/draft-release-ios
+
+  finish:
+    needs: [prepare, packages]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify complete asset set, add checksums, and leave release as draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        run: |
+          python3 tools/draft_release.py finish --run-id "$BUILD_RUN_ID" --release-id "$RELEASE_ID"
+          echo "Draft assembled. Review it under the repository's Releases page; nothing was published." >> "$GITHUB_STEP_SUMMARY"

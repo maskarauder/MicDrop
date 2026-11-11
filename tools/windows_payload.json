@@ -1,0 +1,16 @@
+{
+  "portable": {
+    "MicDrop.exe": "build/host/MicDrop.exe",
+    "micdrop_rtc.dll": "build/native/native/rtc/Release/micdrop_rtc.dll",
+    "LICENSE": "LICENSE",
+    "NOTICE": "NOTICE",
+    "WEBRTC-NOTICE.txt": ".deps/webrtc/windows/webrtc/NOTICE",
+    "WEBRTC-VERSIONS.txt": ".deps/webrtc/windows/webrtc/VERSIONS",
+    "QR-CODE-NOTICE.txt": "third_party/QR-CODE-NOTICE.txt",
+    "DISCOVERY-NOTICES.txt": "third_party/DISCOVERY-NOTICES.txt",
+    "WEBSOCKET-NOTICE.txt": "third_party/WEBSOCKET-NOTICE.txt",
+    "README.md": "docs/WINDOWS_PACKAGE.md",
+    "BETA_TESTING.md": "docs/BETA_TESTING.md"
+  },
+  "installer_only": ["MicDrop-maintenance.exe", "INNOSETUP-NOTICE.txt"]
+}

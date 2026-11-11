@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: MPL-2.0
+name: iPhone app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/ios/**'
+      - 'third_party/**'
+      - 'tools/*ios*'
+      - 'tools/fetch_webrtc.py'
+      - 'tools/check_swiftpm_pins.py'
+      - 'tools/release_version.py'
+      - 'internal/version/version.properties'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/ios/**'
+      - 'third_party/**'
+      - 'tools/*ios*'
+      - 'tools/fetch_webrtc.py'
+      - 'tools/check_swiftpm_pins.py'
+      - 'tools/release_version.py'
+      - 'internal/version/version.properties'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+    inputs:
+      simulator_tests:
+        description: Run Apple-only unit tests on an iOS simulator (PR checks always include them)
+        type: boolean
+        default: true
+      upload_artifacts:
+        description: Upload unsigned IPA and diagnostic artifacts to GitHub Actions
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+
+jobs:
+  ios:
+    name: iPhone unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      MICDROP_BUNDLE_ID: com.maskarauder.micdrop.dev
+      XCODE_RESOLVED: apps/ios/MicDrop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26+ and verify runner tools
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+            dev_dir=/Applications/Xcode_26.6.app/Contents/Developer
+          else
+            dev_dir=/Applications/Xcode.app/Contents/Developer
+          fi
+          export DEVELOPER_DIR="$dev_dir"
+          echo "DEVELOPER_DIR=$dev_dir" >> "$GITHUB_ENV"
+          echo "Platform: $RUNNER_OS/$RUNNER_ARCH"
+          sw_vers
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          python3 - "$RUNNER_TEMP/xcode-version.txt" <<'PY'
+          from pathlib import Path
+          import re, sys
+          text = Path(sys.argv[1]).read_text(encoding="utf-8")
+          match = re.search(r"^Xcode (\d+)\.", text, re.MULTILINE)
+          if not match or int(match.group(1)) < 26:
+              raise SystemExit(f"Expected Xcode 26 or newer, got:\n{text}")
+          PY
+          swift --version
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+      - name: Check committed Swift package pins and notices
+        run: python3 tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
+      - name: Prepare build scratch directories
+        run: |
+          set -euo pipefail
+          cache="$RUNNER_TEMP/micdrop-ios-build"
+          mkdir -p "$cache/dependency-archives" "$cache/SourcePackages" "$cache/DerivedData"
+          echo "MICDROP_IOS_CACHE=$cache" >> "$GITHUB_ENV"
+          mkdir -p .deps
+          if [ -e .deps/cache ] || [ -L .deps/cache ]; then
+            echo '::error::Checkout did not clear .deps/cache; inspect it before retrying.'
+            exit 1
+          fi
+          ln -s "$cache/dependency-archives" .deps/cache
+      - name: Fetch verified iOS WebRTC
+        run: |
+          python3 tools/fetch_webrtc.py ios
+          cat .deps/webrtc/ios/VERSIONS .deps/webrtc/ios/DEPS
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION.zip"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $archive" | shasum -a 256 --check --strict
+          rm -rf "$RUNNER_TEMP/xcodegen"
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/xcodegen/bin/xcodegen"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version | grep -F "$XCODEGEN_VERSION"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Generate Xcode project
+        run: xcodegen generate --spec apps/ios/project.yml
+      - name: Use committed Swift package pins
+        run: |
+          mkdir -p "$(dirname "$XCODE_RESOLVED")"
+          cp apps/ios/MicDropKit/Package.resolved "$XCODE_RESOLVED"
+      # No -onlyUsePackageVersionsFromResolvedFile here: Xcode computes originHash from the project, not
+      # from MicDropKit, and may refuse the copied file. It still keeps the copied pins; the next step is
+      # the gate that fails on any drift.
+      - name: Resolve pinned Swift packages
+        run: >-
+          xcodebuild -resolvePackageDependencies
+          -project apps/ios/MicDrop.xcodeproj -scheme MicDrop
+          -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages"
+          -skipPackagePluginValidation -skipMacroValidation
+      - name: Verify Xcode package resolution
+        run: python3 tools/check_swiftpm_pins.py compare "$XCODE_RESOLVED" apps/ios/MicDropKit/Package.resolved
+      - name: Continue building after errors
+        run: defaults write com.apple.dt.Xcode IDEBuildingContinueBuildingAfterErrors -bool YES
+      - name: Read shared release version
+        run: python3 tools/ios_version.py >> "$GITHUB_ENV"
+      - name: Build unsigned iPhone app
+        id: build
+        run: |
+          set -uo pipefail
+          revision=local
+          if [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then revision="${GITHUB_SHA:0:12}"; fi
+          echo "MICDROP_REVISION=$revision" >> "$GITHUB_ENV"
+          mkdir -p build/ios
+          log=build/ios/xcodebuild.log
+          status=0
+          xcodebuild build -quiet \
+            -project apps/ios/MicDrop.xcodeproj -scheme MicDrop -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$MICDROP_IOS_CACHE/DerivedData" \
+            -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            MARKETING_VERSION="$MICDROP_MARKETING_VERSION" CURRENT_PROJECT_VERSION="$MICDROP_BUILD_NUMBER" \
+            MICDROP_VERSION_NAME="$MICDROP_VERSION_NAME" \
+            MICDROP_REVISION="$revision" >"$log" 2>&1 || status=$?
+          warnings=$(grep -c ': warning: ' "$log" || true)
+          echo "xcodebuild exit status $status; $warnings warning lines (full quiet log: ios-xcodebuild-log artifact on failure)"
+          echo "::group::Compiler warnings (unique)"
+          grep ': warning: ' "$log" | sort -u | head -n 400 || true
+          echo "::endgroup::"
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Quiet xcodebuild output (last 150 lines)"
+            tail -n 150 "$log"
+            echo "::endgroup::"
+            echo "xcodebuild errors (unique, at most 300):"
+            grep -E 'error:|^ld: |Undefined symbol|duplicate symbol' "$log" | sort -u | head -n 300 || true
+            sed -n '/The following build commands failed/,$p' "$log" | head -n 40 || true
+            grep -E '^/[^:]+:[0-9]+:[0-9]+: (fatal )?error: ' "$log" | sort -u | head -n 40 | while IFS= read -r line; do
+              file=${line%%:*}; rest=${line#*:}; row=${rest%%:*}; rest=${rest#*:}; column=${rest%%:*}
+              message=${rest#*error: }; message=${message//%/%25}
+              echo "::error file=${file#"$GITHUB_WORKSPACE/"},line=$row,col=$column::$message"
+            done || true
+            exit "$status"
+          fi
+      - name: Retain xcodebuild failure log
+        if: failure() && steps.build.outcome == 'failure'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: true
+          name: ios-xcodebuild-log
+          path: build/ios/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          app="$MICDROP_IOS_CACHE/DerivedData/Build/Products/Release-iphoneos/MicDrop.app"
+          test -d "$app"
+          rm -rf build/ios/ipa build/ios/MicDrop.ipa
+          mkdir -p build/ios/ipa/Payload
+          ditto "$app" build/ios/ipa/Payload/MicDrop.app
+          (cd build/ios/ipa && zip -qry -X ../MicDrop.ipa Payload)
+          shasum -a 256 build/ios/MicDrop.ipa | tee build/ios/MicDrop.ipa.sha256
+          du -sh "$app" "$app/Frameworks" build/ios/MicDrop.ipa
+      - name: Verify iPhone bundle contracts
+        run: >-
+          python3 tools/check_ios_bundle.py build/ios/MicDrop.ipa
+          --bundle-id "$MICDROP_BUNDLE_ID" --minimum-os 17.0 --revision "$MICDROP_REVISION"
+      - name: Retain iPhone IPA
+        id: ios_ipa
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          name: ios-ipa
+          path: build/ios/MicDrop.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Summarize iPhone IPA build
+        env:
+          IPA_DOWNLOAD_URL: ${{ steps.ios_ipa.outputs.artifact-url }}
+        run: |
+          {
+            if [ -n "$IPA_DOWNLOAD_URL" ]; then
+              echo "[Download MicDrop.ipa]($IPA_DOWNLOAD_URL)"
+              echo
+            fi
+            echo "SHA-256 \`$(cut -d' ' -f1 build/ios/MicDrop.ipa.sha256)\` · build \`$MICDROP_REVISION\`"
+            echo
+            echo "Unsigned development build. Install it with Sideloadly and your Apple ID (docs/DEVELOPMENT.md, Install on iPhone)."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Apple-only unit tests on an iOS simulator
+        id: simulator
+        if: github.event_name == 'pull_request' || github.event_name == 'push' || inputs.simulator_tests
+        run: |
+          set -euo pipefail
+          sim_id="$(xcrun simctl list devices available -j | python3 -c '
+          import json, re, sys
+          data = json.load(sys.stdin).get("devices", {})
+          candidates = []
+          for runtime, devices in data.items():
+              m = re.search(r"iOS-(\d+)-(\d+)(?:-(\d+))?", runtime)
+              if not m:
+                  continue
+              ver = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+              for dev in devices:
+                  if not dev.get("isAvailable"):
+                      continue
+                  name = dev.get("name", "")
+                  if not name.startswith("iPhone"):
+                      continue
+                  preferred = 1 if name == "iPhone 17" else (0 if "SE" not in name else -1)
+                  candidates.append((ver, preferred, name, dev["udid"]))
+          if not candidates:
+              raise SystemExit("No available iPhone simulator runtime found")
+          candidates.sort(reverse=True)
+          ver, _, name, udid = candidates[0]
+          sys.stderr.write(f"Selected simulator: {name} (iOS {ver[0]}.{ver[1]}.{ver[2]}) [{udid}]\n")
+          print(udid)
+          ')"
+          status=0
+          xcodebuild test -quiet \
+            -project apps/ios/MicDrop.xcodeproj -scheme MicDrop -configuration Debug \
+            -destination "platform=iOS Simulator,id=$sim_id" \
+            -derivedDataPath "$MICDROP_IOS_CACHE/DerivedData-simulator" \
+            -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages" \
+            -resultBundlePath build/ios/simulator-results.xcresult \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+            > build/ios/simulator-test.log 2>&1 || status=$?
+          cat build/ios/simulator-test.log
+          if [ -d build/ios/simulator-results.xcresult ]; then
+            xcrun xcresulttool get test-results summary --path build/ios/simulator-results.xcresult \
+              > build/ios/simulator-summary.json || true
+            cat build/ios/simulator-summary.json
+          fi
+          exit "$status"
+      - name: Retain simulator test evidence
+        if: always() && (github.event_name == 'pull_request' || github.event_name == 'push' || inputs.simulator_tests)
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true || job.status == 'failure' }}
+          name: ios-simulator-results
+          path: |
+            build/ios/simulator-test.log
+            build/ios/simulator-summary.json
+            build/ios/simulator-results.xcresult
+          if-no-files-found: warn
+          retention-days: 7

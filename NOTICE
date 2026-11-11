@@ -1,0 +1,27 @@
+MicDrop — license and source information
+
+SPDX-License-Identifier: MPL-2.0
+
+Unless a file or its accompanying notices state otherwise, all first-party
+MicDrop files in this repository are covered by the Mozilla Public License,
+version 2.0. This includes application and native code, services, tests, build
+and deployment scripts, configuration, and documentation. The following notice
+applies to those files:
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+The complete license is included in LICENSE.
+
+Source repository: https://github.com/maskarauder/MicDrop
+For an official release, use its matching release tag. For a development build,
+use the build's recorded Git revision. A distributor must make the corresponding
+MPL-covered source, including its modifications, available to recipients and
+tell them how to obtain it. A fork or modified build must provide its own source
+location if the source above does not match that build.
+
+Third-party code, assets, and tools retain their own licenses and notices.
+This notice does not relicense them. Keep their accompanying notices when
+redistributing a package. See third_party/ and the notices included with each
+binary distribution for dependency-specific information.

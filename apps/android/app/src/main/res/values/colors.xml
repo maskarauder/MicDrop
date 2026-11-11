@@ -1,0 +1,14 @@
+<resources>
+  <!-- Match the Windows desktop palette; Windows COLORREF stores BGR, not RGB. -->
+  <color name="app_background">#202831</color>
+  <color name="surface">#2A3541</color>
+  <color name="surface_border">#394551</color>
+  <color name="accent">#D4AC45</color>
+  <color name="text_primary">#E9EEF2</color>
+  <color name="text_secondary">#BDC8D2</color>
+  <color name="text_disabled">#8F9EAE</color>
+  <color name="control_surface">#8F9EAE</color>
+  <color name="control_disabled">#6F7E8E</color>
+  <color name="on_control">#000000</color>
+  <color name="control_highlight">#33D4AC45</color>
+</resources>

@@ -1,0 +1,32 @@
+[Unit]
+Description=MicDrop authenticated rendezvous
+Wants=network-online.target micdrop-caddy-access.service
+After=network-online.target micdrop-caddy-access.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=micdrop
+Group=micdrop
+EnvironmentFile=/etc/micdrop-rendezvous/service.conf
+ExecStart=/usr/local/bin/micdrop-rendezvous serve --config /etc/micdrop-rendezvous/config.json --listen ${MICDROP_LISTEN} --tls-cert ${CADDY_CERT} --tls-key ${CADDY_KEY} --tls-name ${MICDROP_HOSTNAME}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

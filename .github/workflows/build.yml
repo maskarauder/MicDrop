@@ -1,0 +1,510 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Build and audio contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: Upload build outputs and diagnostic artifacts to GitHub Actions
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Host and native contracts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check Windows runner and Defender configuration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Command python, cmake, gcc, bash, pwsh -ErrorAction Stop | Format-Table Name, Source
+          # Checkout uses a temporary Git config; Go needs trust in the runner account's config too.
+          git config --global --fixed-value --replace-all safe.directory $env:GITHUB_WORKSPACE $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw 'Could not trust the Windows checkout for build metadata.' }
+          git status --porcelain=v1 --untracked-files=no
+          if ($LASTEXITCODE -ne 0) { throw 'Git cannot read the Windows checkout; see its error above.' }
+          ./tools/scan_windows.ps1 -ConfigureEphemeralRunner
+          ./tools/scan_windows.ps1 -CheckConfiguration
+      - name: Select the Windows cgo toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path 'C:\mingw64\bin\gcc.exe') {
+            'C:\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+          } else {
+            $gccDir = Split-Path -Parent (Get-Command gcc.exe -ErrorAction Stop).Source
+            $gccDir | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+      - name: Fetch verified native WebRTC
+        if: runner.os == 'Windows'
+        run: python tools/fetch_webrtc.py windows
+      - name: Configure portable contracts
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
+      - name: Configure Windows WebRTC and contracts
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build/native -A x64 -DMICDROP_BUILD_RTC=ON
+      - run: cmake --build build/native --config Release
+      - run: ctest --test-dir build/native -C Release --output-on-failure --verbose
+      - name: Validate shared version and draft-release boundaries
+        run: |
+          python tools/release_version.py
+          python -m unittest discover -s tools -p 'test_draft_release.py' -v
+      - name: Check Android version-code upgrade ordering
+        if: runner.os == 'Linux' && (github.event_name == 'pull_request' || github.event_name == 'push')
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIOUS_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$PREVIOUS_SHA" ] || [ "$PREVIOUS_SHA" = "0000000000000000000000000000000000000000" ]; then
+            python tools/release_version.py --previous 0000000000000000000000000000000000000000
+          else
+            auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              fetch --no-tags --depth=1 origin "$PREVIOUS_SHA"
+            python tools/release_version.py --previous "$PREVIOUS_SHA"
+          fi
+      - name: Validate retained artifact boundaries and retention
+        run: python -m unittest discover -s tools -p 'test_store_artifact.py' -v
+      - name: Validate Defender positive-control event matching
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/test_scan_windows.ps1
+      - name: Validate native dependency selection and checksums
+        if: runner.os == 'Linux'
+        run: python -m unittest discover -s tools -p 'test_fetch_webrtc.py' -v
+      - name: Validate iPhone bundle and Swift package pin checks
+        if: runner.os == 'Linux'
+        run: |
+          python -m unittest discover -s tools -p 'test_ios_bundle.py' -v
+          python -m unittest discover -s tools -p 'test_swiftpm_pins.py' -v
+          python -m unittest discover -s tools -p 'test_ios_version.py' -v
+          python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
+      - name: Validate Android page-size rejection checks
+        if: runner.os == 'Linux'
+        run: python -m unittest discover -s tools -p 'test_android_page_sizes.py' -v
+      - name: Validate latency analysis with known offsets
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: '1'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/latency-venv"
+          "$RUNNER_TEMP/latency-venv/bin/pip" install --requirement tools/latency/requirements.txt
+          "$RUNNER_TEMP/latency-venv/bin/python" -m unittest discover -s tools/latency -p 'test_*.py' -v
+      - name: Check Go formatting
+        shell: bash
+        run: test -z "$(gofmt -l apps/windows-host native internal services)"
+      - name: Go tests and native binding
+        env:
+          CGO_ENABLED: '1'
+          CC: gcc
+          CXX: g++
+        run: go test ./...
+      - name: Go static checks
+        env:
+          CGO_ENABLED: '1'
+          CC: gcc
+          CXX: g++
+        run: go vet ./...
+      - name: Check native Windows desktop controls
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MICDROP_DESKTOP_PREVIEW_DIR: build/desktop-preview
+        run: |
+          # Exercise the same common-controls/DPI manifest as the packaged app.
+          $DesktopTestResource = Join-Path $PWD 'internal/desktop/desktop_test_windows_amd64.syso'
+          try {
+            Push-Location apps/windows-host/resources
+            try {
+              windres desktop.rc -O coff -o $DesktopTestResource
+              if ($LASTEXITCODE -ne 0) { throw 'Could not compile the desktop test manifest.' }
+            } finally { Pop-Location }
+            go test -count=1 -v ./internal/desktop
+            if ($LASTEXITCODE -ne 0) { throw 'Native desktop checks failed.' }
+          } finally { Remove-Item -LiteralPath $DesktopTestResource -Force -ErrorAction SilentlyContinue }
+      - name: Compile Windows desktop manifest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Push-Location apps/windows-host/resources
+          try {
+            windres desktop.rc -O coff -o ../desktop_windows_amd64.syso
+            if ($LASTEXITCODE -ne 0) { throw 'Could not compile the desktop manifest.' }
+          } finally { Pop-Location }
+      - name: Build host harness
+        env:
+          CGO_ENABLED: '1'
+          CC: gcc
+          CXX: g++
+        run: go build -trimpath -o build/host/ ./apps/windows-host
+      - name: Build Windows desktop app
+        if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: '1'
+          CC: gcc
+          CXX: g++
+        run: go build -trimpath -ldflags="-H=windowsgui" -o build/host/MicDrop.exe ./apps/windows-host
+      - name: Prepare Windows release payload and notices
+        if: runner.os == 'Windows'
+        run: python tools/windows_payload.py
+      - name: Build per-user Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/build_windows_installer.ps1 -PayloadDirectory build/host -OutputDirectory build/windows-installer
+      - name: Check isolated Windows install, upgrade and uninstall
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: pwsh
+        run: ./tools/test_windows_installer.ps1 -PayloadDirectory build/host -CompilerPath .deps/inno-setup-7.1.0/ISCC.exe -ReportDirectory build/windows-installer-tests
+      - name: Scan Windows package with Microsoft Defender
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./tools/scan_windows.ps1 -Path build/host,build/windows-installer -ReportDirectory build/windows-defender-scan
+      - name: Verify Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\build\host\windows-host.exe doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build\host\windows-host.exe rtc-check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build\host\windows-host.exe tone --output build\ci-tone.wav --duration 25ms
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain Windows antivirus scan report
+        if: always() && runner.os == 'Windows'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true || job.status == 'failure' }}
+          name: windows-defender-scan
+          path: build/windows-defender-scan/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Retain Windows diagnostic harness
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          name: windows-x64-harness
+          path: build/host/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain Windows installer test report
+        if: always() && runner.os == 'Windows'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true || job.status == 'failure' }}
+          name: windows-installer-tests
+          path: build/windows-installer-tests/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Retain per-user Windows installer
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          name: windows-x64-installer
+          path: build/windows-installer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify Windows draft-release packaging without uploading
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python tools/draft_release.py stage --platform windows --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
+
+  rendezvous:
+    name: Remote rendezvous contracts and service
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Relay and service race contracts
+        run: go test -race ./internal/rendezvous ./services/signaling
+      - name: Validate Caddy certificate permissions and renewal
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes acl
+          bash -n deploy/systemd/install.sh
+          sudo python3 -B -m unittest discover -s deploy/systemd -p 'test_*.py' -v
+      - name: Build standalone rendezvous
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -o build/rendezvous/micdrop-rendezvous ./services/signaling
+          python tools/package_service_docs.py
+          mkdir -p build/rendezvous/systemd
+          cp deploy/systemd/install.sh deploy/systemd/caddy-access.py deploy/systemd/*.service deploy/systemd/*.timer build/rendezvous/systemd/
+          cp third_party/WEBSOCKET-NOTICE.txt third_party/DISCOVERY-NOTICES.txt build/rendezvous/
+          cp LICENSE NOTICE build/rendezvous/
+      - name: Verify systemd units
+        run: |
+          sudo install -m 0755 build/rendezvous/micdrop-rendezvous /usr/local/bin/micdrop-rendezvous
+          systemd-analyze verify deploy/systemd/*.service deploy/systemd/*.timer
+      - name: Retain rendezvous development service
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: rendezvous-linux-x64
+          path: build/rendezvous/*
+          if-no-files-found: error
+          retention-days: 14
+
+  android-pairing:
+    name: Android pairing platform contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          cache-disabled: true
+      - name: Install pinned Android packages
+        run: |
+          mkdir -p "$RUNNER_TEMP/.android"
+          echo "ANDROID_USER_HOME=$RUNNER_TEMP/.android" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0" "platform-tools" "emulator"
+      - name: Enable KVM permissions on Ubuntu runner
+        run: |
+          if [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+      - name: Check emulator acceleration and disk space
+        run: |
+          test -r /dev/kvm && test -w /dev/kvm || { echo '::error::The Linux runner requires hardware virtualization (/dev/kvm) for Android emulator pairing tests.'; exit 1; }
+          "$ANDROID_HOME/emulator/emulator" -accel-check
+          df -h "$ANDROID_HOME" "$RUNNER_TEMP"
+      - name: Verify Android Keystore and Conscrypt mutual TLS
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          working-directory: apps/android
+          script: ./gradlew --no-daemon -PmicdropPairingOnly=true :pairing-check:connectedDebugAndroidTest
+      - name: Retain pairing platform test reports
+        if: always()
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true || job.status == 'failure' }}
+          name: android-pairing-test-reports
+          path: |
+            apps/android/pairing-check/build/reports/androidTests/
+            apps/android/pairing-check/build/outputs/androidTest-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    name: Android arm64 app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          cache-disabled: true
+      - name: Install pinned Android packages
+        run: >-
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "platforms;android-36" "build-tools;35.0.0"
+          "ndk;27.0.12077973"
+      - name: Fetch verified Android WebRTC
+        run: python tools/fetch_webrtc.py android
+      - name: Prepare Android development signing
+        id: android_signing
+        env:
+          MICDROP_DEBUG_KEYSTORE_BASE64: ${{ secrets.MICDROP_DEBUG_KEYSTORE_BASE64 }}
+        run: python tools/android_signing.py prepare
+      - name: Test, compile, and lint
+        working-directory: apps/android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+      - name: Verify Android native 16 KB alignment
+        run: |
+          python tools/check_android_page_sizes.py apps/android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 apps/android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Verify Android APK signing certificate
+        run: >-
+          python tools/android_signing.py verify
+          apps/android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+      - name: Retain Android APK directly
+        id: android_apk
+        if: steps.android_signing.outputs.stable_signer == 'true'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          name: android-apk
+          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Show Android APK download link
+        if: steps.android_apk.outputs.artifact-url != ''
+        env:
+          APK_DOWNLOAD_URL: ${{ steps.android_apk.outputs.artifact-url }}
+        run: echo "[Download app-debug.apk]($APK_DOWNLOAD_URL)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify Android draft-release packaging without uploading
+        if: steps.android_signing.outputs.stable_signer == 'true'
+        run: python tools/draft_release.py stage --platform android --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
+      - name: Remove runner signing material
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${MICDROP_DEBUG_KEYSTORE:-}" ]; then
+            rm -f -- "$MICDROP_DEBUG_KEYSTORE"
+            rmdir -- "$(dirname -- "$MICDROP_DEBUG_KEYSTORE")"
+          fi
+
+  ios-package:
+    name: iPhone portable Swift contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SWIFT_CI_IMAGE: swift:6.3.3-noble@sha256:cd45c27b3abc42310c33cfaf3008b18156cbdc9187834c9617e8f43a26d2675c
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare Swift build scratch directory
+        run: |
+          cache="$RUNNER_TEMP/swift-6.3.3-build"
+          mkdir -p "$cache"
+          echo "SWIFT_BUILD_DIR=$cache" >> "$GITHUB_ENV"
+          docker run --rm "$SWIFT_CI_IMAGE" swift --version
+      - name: Require committed Swift package pins
+        run: |
+          if [ ! -f apps/ios/MicDropKit/Package.resolved ]; then
+            echo "::error file=apps/ios/MicDropKit/Package.resolved::Commit SwiftPM-generated pins with the package manifest and notices before building."
+            exit 1
+          fi
+      - name: Build portable package and tests from pinned versions
+        id: build
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/swift-build.log"
+          status=0
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" \
+            --volume "$SWIFT_BUILD_DIR:/swift-build" "$SWIFT_CI_IMAGE" \
+            swift build --package-path apps/ios/MicDropKit --scratch-path /swift-build \
+            --force-resolved-versions --jobs 2 --build-tests 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Swift build errors (unique)"
+            grep -E 'error:' "$log" | sort -u | head -n 300 || true
+            echo "::endgroup::"
+            grep -E '^/[^:]+:[0-9]+:[0-9]+: error: ' "$log" | sort -u | head -n 30 | while IFS= read -r line; do
+              file=${line%%:*}; rest=${line#*:}; row=${rest%%:*}; rest=${rest#*:}; column=${rest%%:*}
+              message=${rest#*: error: }; message=${message//%/%25}
+              echo "::error file=${file#"$GITHUB_WORKSPACE/"},line=$row,col=$column::$message"
+            done || true
+            exit "$status"
+          fi
+      - name: Portable Swift contracts
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" \
+            --volume "$SWIFT_BUILD_DIR:/swift-build" "$SWIFT_CI_IMAGE" \
+            swift test --package-path apps/ios/MicDropKit --scratch-path /swift-build \
+            --force-resolved-versions --jobs 2 --skip-build
+
+  ios-format:
+    name: iPhone Swift formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SWIFT_CI_IMAGE: swift:6.3.3-noble@sha256:cd45c27b3abc42310c33cfaf3008b18156cbdc9187834c9617e8f43a26d2675c
+      SWIFT_SOURCES: apps/ios/MicDrop apps/ios/MicDropAppTests apps/ios/MicDropKit/Package.swift apps/ios/MicDropKit/Sources apps/ios/MicDropKit/Tests
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check Swift formatting
+        id: lint
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" \
+            "$SWIFT_CI_IMAGE" swift format lint --strict --recursive \
+            --configuration apps/ios/.swift-format $SWIFT_SOURCES
+      - name: Prepare automatic formatting patch
+        if: failure() && steps.lint.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" \
+            "$SWIFT_CI_IMAGE" swift format format --in-place --recursive \
+            --configuration apps/ios/.swift-format $SWIFT_SOURCES
+          mkdir -p build
+          git diff --no-color > build/swift-format.patch
+          git diff --stat
+          echo "Apply the swift-format.patch artifact with 'git apply swift-format.patch'. Findings that swift-format cannot fix automatically remain in the lint output above."
+      - name: Retain automatic formatting patch
+        if: failure() && steps.lint.outcome == 'failure'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: true
+          name: swift-format-patch
+          path: build/swift-format.patch
+          archive: false
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true

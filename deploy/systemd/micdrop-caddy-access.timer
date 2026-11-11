@@ -1,0 +1,11 @@
+[Unit]
+Description=Maintain MicDrop certificate read access after Caddy renewal
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=5s
+Unit=micdrop-caddy-access.service
+
+[Install]
+WantedBy=timers.target

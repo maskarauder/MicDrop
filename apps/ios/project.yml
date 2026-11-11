@@ -1,0 +1,105 @@
+# XcodeGen specification for the iPhone app. CI generates apps/ios/MicDrop.xcodeproj from
+# this file; the generated project is git-ignored. Run `python3 tools/fetch_webrtc.py ios` first: both
+# .deps inputs below are required sources, so XcodeGen fails if WebRTC was not fetched and verified.
+name: MicDrop
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  defaultConfig: Release
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    # Local defaults only: CI passes the shared internal/version/version.properties values
+    # (tools/ios_version.py) to xcodebuild.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "3"
+    MICDROP_VERSION_NAME: "0.1.0-beta.2"
+    MICDROP_REVISION: local
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+    COMPILER_INDEX_STORE_ENABLE: "NO"
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    ENABLE_DEBUG_DYLIB: "NO"
+    ENABLE_PREVIEWS: "NO"
+packages:
+  MicDropKit:
+    path: MicDropKit
+targets:
+  MicDrop:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: MicDrop
+        # INFOPLIST_FILE names it; it must not be copied as a resource.
+        excludes:
+          - Info.plist
+      # MicDrop's own MPL-2.0 notice and license (D048), shown first under Open-source notices.
+      - path: ../../NOTICE
+        buildPhase: resources
+      - path: ../../LICENSE
+        buildPhase: resources
+      - path: ../../third_party/ios-assets/ios-notices.txt
+        buildPhase: resources
+      - path: ../../.deps/webrtc/ios/assets/webrtc-notice.txt
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: MicDrop
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskarauder.micdrop.dev
+        # XcodeGen's iOS target preset sets 1,2; the app is iPhone-only (checked by check_ios_bundle.py).
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: MicDrop/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        SUPPORTS_MACCATALYST: "NO"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+    dependencies:
+      - framework: ../../.deps/webrtc/ios/WebRTC.xcframework
+        embed: true
+      - package: MicDropKit
+        products:
+          - MicDropCore
+          - MicDropIdentity
+          - MicDropTransport
+  MicDropAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: MicDropAppTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskarauder.micdrop.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+    dependencies:
+      - target: MicDrop
+      - package: MicDropKit
+        # The host already links these static products. Import their modules without linking twice.
+        link: false
+        products:
+          - MicDropCore
+          - MicDropTransport
+schemes:
+  MicDrop:
+    build:
+      targets:
+        MicDrop: all
+    run:
+      config: Release
+    test:
+      config: Debug
+      targets:
+        - MicDropAppTests
+    archive:
+      config: Release

@@ -1,0 +1,35 @@
+add_executable(media_contract_test media_contract_test.cc c_header_test.c)
+target_link_libraries(media_contract_test PRIVATE micdrop_media)
+add_test(NAME media_contract COMMAND media_contract_test)
+
+add_executable(pcm_contract_test pcm_contract_test.cc)
+target_include_directories(pcm_contract_test PRIVATE "${PROJECT_SOURCE_DIR}/native/platform/windows")
+target_compile_features(pcm_contract_test PRIVATE cxx_std_20)
+add_test(NAME pcm_contract COMMAND pcm_contract_test)
+
+add_executable(stereo_contract_test stereo_contract_test.cc)
+target_compile_features(stereo_contract_test PRIVATE cxx_std_20)
+add_test(NAME stereo_contract COMMAND stereo_contract_test)
+
+add_executable(bridge_signal_contract_test bridge_signal_contract_test.cc)
+target_include_directories(bridge_signal_contract_test PRIVATE "${PROJECT_SOURCE_DIR}/native/platform/windows")
+target_compile_features(bridge_signal_contract_test PRIVATE cxx_std_20)
+add_test(NAME bridge_signal_contract COMMAND bridge_signal_contract_test)
+
+add_executable(playout_buffer_contract_test playout_buffer_contract_test.cc)
+target_compile_features(playout_buffer_contract_test PRIVATE cxx_std_20)
+add_test(NAME playout_buffer_contract COMMAND playout_buffer_contract_test)
+
+add_executable(playout_transport_contract_test playout_transport_contract_test.cc)
+target_compile_features(playout_transport_contract_test PRIVATE cxx_std_20)
+add_test(NAME playout_transport_contract COMMAND playout_transport_contract_test)
+
+add_executable(ice_gathering_contract_test ice_gathering_contract_test.cc)
+target_compile_features(ice_gathering_contract_test PRIVATE cxx_std_20)
+add_test(NAME ice_gathering_contract COMMAND ice_gathering_contract_test)
+
+if(WIN32)
+  add_executable(windows_capture_contract_test windows_capture_contract_test.cc)
+  target_link_libraries(windows_capture_contract_test PRIVATE micdrop_windows_audio)
+  add_test(NAME windows_capture_contract COMMAND windows_capture_contract_test)
+endif()

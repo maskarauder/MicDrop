@@ -1,0 +1,27 @@
+{
+  "build_version": "m155.8059.1.1",
+  "builder_repository": "https://github.com/shiguredo-webrtc-build/webrtc-build",
+  "builder_commit": "a7e636937592dcec0f2e9a0e032795f776c031db",
+  "webrtc_commit": "c4f21b1f91386bae6d710540976dff5aae67b3c5",
+  "assets": {
+    "windows": {
+      "name": "webrtc.windows_x86_64.zip",
+      "sha256": "8f1fa89b9b26623f309b79bb264b752814fa5f10bae129e8d4968db9e19e7200"
+    },
+    "android": {
+      "build_version": "m155.8059.2.0",
+      "builder_commit": "5ef3d36e4562120cae0e597c3923b8532b0821ca",
+      "webrtc_commit": "f89edcb7be1f4be029ee7186e36b2b35ec03373e",
+      "name": "libwebrtc.aar",
+      "sha256": "33db9de4c6bca21f927b40e9a7319287c8adce1d8b734f15b42e5366bd1cc89a"
+    },
+    "ios": {
+      "build_version": "m155.8059.2.0",
+      "builder_commit": "5ef3d36e4562120cae0e597c3923b8532b0821ca",
+      "webrtc_commit": "f89edcb7be1f4be029ee7186e36b2b35ec03373e",
+      "name": "webrtc.ios_sdk.tar.gz",
+      "sha256": "1fcd96b58f671f0d67609d051947913b953e4873b99cf95d5811236cf22b2300",
+      "size": 200971448
+    }
+  }
+}

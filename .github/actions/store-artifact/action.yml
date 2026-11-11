@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Store MicDrop artifact
+description: Verify outputs locally and optionally upload artifacts or retained release bundles to GitHub Actions.
+inputs:
+  name:
+    description: Unique artifact name within this workflow run.
+    required: true
+  path:
+    description: Workspace-relative files, directories, or globs, one per line.
+    required: true
+  if-no-files-found:
+    description: Either error or warn.
+    default: warn
+  retention-days:
+    description: Artifact retention in days (1 to 90).
+    default: '14'
+  archive:
+    description: Whether the optional GitHub upload is a ZIP archive.
+    default: 'true'
+  overwrite:
+    description: Whether the optional direct GitHub upload may replace its name.
+    default: 'false'
+  upload-to-github:
+    description: Upload the artifact to GitHub Actions storage.
+    default: 'false'
+  retain-release-bundle:
+    description: Upload the verified manifest.json and files directory for cross-job draft-release assembly.
+    default: 'false'
+outputs:
+  local-path:
+    description: Verified artifact directory on the runner.
+    value: ${{ steps.local.outputs.local-path }}
+  artifact-url:
+    description: GitHub download URL, empty when upload-to-github is false.
+    value: ${{ steps.upload_zip.outputs.artifact-url || steps.upload_file.outputs.artifact-url }}
+runs:
+  using: composite
+  steps:
+    - name: Stage verified artifact manifest locally
+      id: local
+      if: always()
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        MICDROP_ARTIFACT_NAME: ${{ inputs.name }}
+        MICDROP_ARTIFACT_PATHS: ${{ inputs.path }}
+        MICDROP_ARTIFACT_MISSING: ${{ inputs.if-no-files-found }}
+        MICDROP_ARTIFACT_DAYS: ${{ inputs.retention-days }}
+      run: |
+        if python3 -c 'import sys' >/dev/null 2>&1; then
+          python3 tools/store_artifact.py
+        else
+          python tools/store_artifact.py
+        fi
+    - name: Upload ZIP copy to GitHub
+      id: upload_zip
+      if: ${{ !cancelled() && steps.local.outcome == 'success' && steps.local.outputs.has-files == 'true' && inputs.upload-to-github == 'true' && inputs.archive != 'false' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+    - name: Upload direct file copy to GitHub
+      id: upload_file
+      if: ${{ !cancelled() && steps.local.outcome == 'success' && steps.local.outputs.has-files == 'true' && inputs.upload-to-github == 'true' && inputs.archive == 'false' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        path: ${{ inputs.path }}
+        archive: false
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+        overwrite: ${{ inputs.overwrite }}
+    - name: Upload retained release bundle
+      id: upload_retained
+      if: ${{ !cancelled() && steps.local.outcome == 'success' && steps.local.outputs.has-files == 'true' && inputs.retain-release-bundle == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.name }}-retained
+        path: ${{ steps.local.outputs.local-path }}/
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
