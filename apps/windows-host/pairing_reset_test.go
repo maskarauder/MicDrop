@@ -192,8 +192,8 @@ func TestConsoleRevokeAllRejectsExtraArgumentsWithoutChangingApprovals(t *testin
 }
 
 func TestWindowsBulkRevocationPreservesProtectedHostIdentity(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("requires current-user DPAPI and the exclusive pairing lock")
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("requires protected host identity and exclusive pairing lock")
 	}
 	directory := t.TempDir()
 	store, err := identity.NewStore(directory)

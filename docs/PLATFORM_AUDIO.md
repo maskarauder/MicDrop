@@ -1,6 +1,6 @@
 # Platform audio and routing
 
-This guide distinguishes the implemented Windows, Android, and iPhone audio paths from
+This guide distinguishes the implemented Windows, Linux, macOS, Android, and iPhone audio paths from
 hardware-dependent behavior and future platform work. See [beta testing](BETA_TESTING.md)
 for supported setup and the [roadmap](ROADMAP.md) for current coverage and remaining checks.
 
@@ -33,6 +33,45 @@ Microsoft's SYSVAD sample demonstrates virtual audio-driver concepts. Treat it a
 The beta uses a [separately installed virtual cable](VIRTUAL_AUDIO_CABLE.md).
 Endpoint selection remains behind the native adapter. Bundling or writing a
 driver is deferred.
+
+## Linux host
+
+On Linux x64, `capture_linux.cc` loads `libpulse.so.0` dynamically at runtime
+(`dlopen`) so `micdrop-host` works across PipeWire (`pipewire-pulse`) and
+PulseAudio desktop sessions without requiring `libpulse` on headless contract
+or rendezvous runners.
+
+- **Desktop playback capture:** Enumerates active PulseAudio/PipeWire sinks by
+  sink name (with server `default_sink_name` flagged `default_multimedia`) and
+  records `PA_SAMPLE_FLOAT32NE` audio from `<sink_name>.monitor` using
+  `PA_STREAM_ADJUST_LATENCY`. An explicit sink selection never falls back to the
+  default sink if missing.
+- **Microphone return cable:** No kernel module is required on PipeWire or
+  PulseAudio. Create a user-session null sink whose monitor acts as a virtual
+  microphone input for conferencing/recording apps:
+  `pactl load-module module-null-sink sink_name=MicDropMic sink_properties=device.description=MicDrop_Microphone`
+  Then pass `--microphone-device MicDropMic` to `micdrop-host stream` and choose
+  **Monitor of MicDrop_Microphone** (or use `pw-link` / `pactl load-module module-remap-source`)
+  inside the consuming application. Passing the same sink for desktop capture
+  and microphone return is rejected before opening audio.
+
+## macOS host
+
+On macOS arm64 (macOS 14.2 Sonoma or newer), `tap_darwin.m` and
+`capture_darwin.cc` use CoreAudio Hardware Process Taps and `HALOutput`
+AudioUnits without kernel extensions:
+
+- **Desktop playback capture:** Enumerates output `AudioDeviceID` endpoints by
+  persistent CoreAudio `kAudioDevicePropertyDeviceUID`, creates a private
+  unmuted `CATapDescription` (`initWithProcesses:@[] andDeviceUID:withStream:0`)
+  and private aggregate device (`AudioHardwareCreateProcessTap` +
+  `AudioHardwareCreateAggregateDevice`), and pulls non-allocating `Float32`
+  frames on a real-time input `HALOutput` AudioUnit callback. macOS prompts for
+  System Audio Recording permission on first capture.
+- **Microphone return cable:** Renders returned `Float32` PCM into an explicitly
+  selected output device UID (for example a user-space CoreAudio AudioServerPlugIn
+  virtual cable such as BlackHole 2ch). Missing or duplicate explicit UIDs fail
+  closed without falling back to the Mac's speakers.
 
 ## Android playback
 
@@ -88,4 +127,4 @@ A rejected or lost input must not silently fall back to another microphone. Pres
 
 ## Future platforms
 
-The native transport boundary supports distinct platform adapters without assuming identical OS routing. The iPhone client uses its own `AVAudioSession`, background keep-alive, and route-recovery adapter (system output route picker, identifiable route-UID persistence, and no programmatic system-volume or LE Audio input APIs); its verified scope and remaining physical-device checks are summarized in the [roadmap](ROADMAP.md), and no iOS route behavior is assumed from Android results. macOS and Linux desktop hosts still need their own output-capture and virtual-input designs, with platform-specific source research and acceptance tests before claiming support.
+The native transport boundary supports distinct platform adapters without assuming identical OS routing. The iPhone client uses its own `AVAudioSession`, background keep-alive, and route-recovery adapter (system output route picker, identifiable route-UID persistence, and no programmatic system-volume or LE Audio input APIs); its verified scope and remaining physical-device checks are summarized in the [roadmap](ROADMAP.md), and no iOS route behavior is assumed from Android results. Linux x64 and macOS arm64 desktop hosts now implement CLI capture, virtual-cable microphone return, and WebRTC streaming; native desktop GUI parity on macOS and physical multi-OS latency validation remain follow-up work.

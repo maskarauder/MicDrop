@@ -8,4 +8,25 @@ if(WIN32)
   else()
     target_compile_options(micdrop_windows_audio PRIVATE -Wall -Wextra -Wpedantic -Werror)
   endif()
+elseif(APPLE)
+  enable_language(OBJC)
+  add_library(micdrop_windows_audio STATIC capture_darwin.cc tap_darwin.m)
+  set_target_properties(micdrop_windows_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_features(micdrop_windows_audio PUBLIC cxx_std_20)
+  target_include_directories(micdrop_windows_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(micdrop_windows_audio PUBLIC
+    "-framework CoreAudio"
+    "-framework AudioToolbox"
+    "-framework CoreFoundation"
+    "-framework Foundation"
+  )
+  target_compile_options(micdrop_windows_audio PRIVATE -Wall -Wextra -Wpedantic -Werror)
+elseif(UNIX)
+  find_package(Threads REQUIRED)
+  add_library(micdrop_windows_audio STATIC capture_linux.cc)
+  set_target_properties(micdrop_windows_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_features(micdrop_windows_audio PUBLIC cxx_std_20)
+  target_include_directories(micdrop_windows_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(micdrop_windows_audio PUBLIC Threads::Threads dl m)
+  target_compile_options(micdrop_windows_audio PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()

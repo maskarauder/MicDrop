@@ -29,8 +29,9 @@ jobs:
         include:
           - os: ubuntu-24.04
           - os: windows-2022
+          - os: macos-26
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -61,16 +62,54 @@ jobs:
             $gccDir = Split-Path -Parent (Get-Command gcc.exe -ErrorAction Stop).Source
             $gccDir | Out-File -FilePath $env:GITHUB_PATH -Append
           }
-      - name: Fetch verified native WebRTC
+          'CC=gcc' | Out-File -FilePath $env:GITHUB_ENV -Append
+          'CXX=g++' | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Select the Linux cgo toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "CXX=g++" >> "$GITHUB_ENV"
+      - name: Select Xcode 26+ and macOS cgo toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+            dev_dir=/Applications/Xcode_26.6.app/Contents/Developer
+          else
+            dev_dir=/Applications/Xcode.app/Contents/Developer
+          fi
+          export DEVELOPER_DIR="$dev_dir"
+          echo "DEVELOPER_DIR=$dev_dir" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+          if ! command -v python >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/pybin"
+            ln -s "$(command -v python3)" "$RUNNER_TEMP/pybin/python"
+            echo "$RUNNER_TEMP/pybin" >> "$GITHUB_PATH"
+          fi
+          sw_vers
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          cmake --version
+          python3 --version
+      - name: Fetch verified native WebRTC (Windows)
         if: runner.os == 'Windows'
         run: python tools/fetch_webrtc.py windows
-      - name: Configure portable contracts
+      - name: Fetch verified native WebRTC (Linux)
+        if: runner.os == 'Linux'
+        run: python3 tools/fetch_webrtc.py linux
+      - name: Fetch verified native WebRTC (macOS)
+        if: runner.os == 'macOS'
+        run: python3 tools/fetch_webrtc.py macos
+      - name: Configure Unix WebRTC and contracts
         if: runner.os != 'Windows'
-        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release -DMICDROP_BUILD_RTC=ON
       - name: Configure Windows WebRTC and contracts
         if: runner.os == 'Windows'
         run: cmake -S . -B build/native -A x64 -DMICDROP_BUILD_RTC=ON
-      - run: cmake --build build/native --config Release
+      - run: cmake --build build/native --config Release --parallel 4
       - run: ctest --test-dir build/native -C Release --output-on-failure --verbose
       - name: Validate shared version and draft-release boundaries
         run: |
@@ -125,14 +164,10 @@ jobs:
       - name: Go tests and native binding
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go test ./...
       - name: Go static checks
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go vet ./...
       - name: Check native Windows desktop controls
         if: runner.os == 'Windows'
@@ -160,18 +195,63 @@ jobs:
             windres desktop.rc -O coff -o ../desktop_windows_amd64.syso
             if ($LASTEXITCODE -ne 0) { throw 'Could not compile the desktop manifest.' }
           } finally { Pop-Location }
-      - name: Build host harness
+      - name: Build Windows host harness
+        if: runner.os == 'Windows'
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go build -trimpath -o build/host/ ./apps/windows-host
+      - name: Build Unix CLI host and stage runtime payload
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p build/host
+          go build -trimpath -o build/host/micdrop-host ./apps/windows-host
+          cp LICENSE NOTICE build/host/
+          cp third_party/QR-CODE-NOTICE.txt third_party/DISCOVERY-NOTICES.txt third_party/WEBSOCKET-NOTICE.txt build/host/
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cp build/native/native/rtc/libmicdrop_rtc.dylib build/host/
+            cp .deps/webrtc/macos/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
+            cp .deps/webrtc/macos/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
+            codesign --force --sign - build/host/libmicdrop_rtc.dylib build/host/micdrop-host
+          else
+            cp build/native/native/rtc/libmicdrop_rtc.so build/host/
+            cp .deps/webrtc/linux/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
+            cp .deps/webrtc/linux/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
+          fi
+      - name: Verify Unix CLI host executable and native WebRTC library
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/host/micdrop-host version
+          ./build/host/micdrop-host doctor
+          ./build/host/micdrop-host rtc-check
+          ./build/host/micdrop-host tone --output build/ci-tone.wav --duration 25ms
+      - name: Retain Linux CLI host
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: linux-x64-host
+          path: build/host/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain macOS CLI host
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: macos-arm64-host
+          path: build/host/*
+          if-no-files-found: error
+          retention-days: 14
       - name: Build Windows desktop app
         if: runner.os == 'Windows'
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go build -trimpath -ldflags="-H=windowsgui" -o build/host/MicDrop.exe ./apps/windows-host
       - name: Prepare Windows release payload and notices
         if: runner.os == 'Windows'

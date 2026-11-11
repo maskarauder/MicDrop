@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -50,7 +49,7 @@ func TestDoctorAndInvalidArguments(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.NativeABI != 1 || report.Streaming != (runtime.GOOS == "windows" && runtime.GOARCH == "amd64") {
+	if report.NativeABI != 1 || report.Streaming != streamingSupported() {
 		t.Fatalf("incorrect capabilities: %+v", report)
 	}
 	for _, args := range [][]string{nil, {"unknown"}, {"doctor", "extra"}, {"tone"}, {"tone", "--output", "unused.wav", "--duration", "-1s"},
@@ -80,7 +79,7 @@ func TestWAVWriteFailure(t *testing.T) {
 }
 
 func TestStreamRejectsUnsupportedPlatformBeforeListening(t *testing.T) {
-	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+	if streamingSupported() {
 		t.Skip("supported platform")
 	}
 	if code := run([]string{"stream", "--host", "192.168.1.2"}, io.Discard, io.Discard); code != 1 {

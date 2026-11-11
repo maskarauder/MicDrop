@@ -5,8 +5,20 @@
 #include <cstring>
 #include <cstdio>
 #include <numbers>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 
 namespace micdrop {
+namespace {
+bool SameEndpointId(const char* a, const char* b) {
+#ifdef _WIN32
+  return _stricmp(a, b) == 0;
+#else
+  return strcasecmp(a, b) == 0;
+#endif
+}
+}  // namespace
 AudioDevice::AudioDevice(int source, std::string endpoint, std::string return_endpoint)
     : source_(source), endpoint_(std::move(endpoint)),
       return_endpoint_(source == 3 ? endpoint_ : std::move(return_endpoint)),
@@ -56,7 +68,7 @@ int AudioDevice::Format(void* context, const mdw_report* format) {
   // Reject the return cable as the resolved default capture too. Otherwise the
   // cable can feed its own microphone signal back through desktop playback.
   if (LoopbackCapture(self.source_) && !self.return_endpoint_.empty() &&
-      _stricmp(format->device.id, self.return_endpoint_.c_str()) == 0) return 1;
+      SameEndpointId(format->device.id, self.return_endpoint_.c_str())) return 1;
   if (format->sample_rate % 100 || !self.matrix_.Configure(format->channels, format->channel_mask)) return 1;
   self.source_rate_ = format->sample_rate; self.source_channels_ = format->channels;
   self.input_frames_ = format->sample_rate / 100; self.filled_ = 0;

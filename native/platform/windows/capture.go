@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 )
 
-var ErrUnsupported = errors.New("WASAPI audio requires Windows; this build only supports offline contract checks")
+var ErrUnsupported = errors.New("desktop audio requires Windows x64, Linux x64, or macOS arm64; this build only supports offline contract checks")
 
 type Device struct {
 	ID                string `json:"id"`

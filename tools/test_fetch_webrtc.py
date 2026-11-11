@@ -76,6 +76,17 @@ def ios_files(source="ios-source", deployment="14.0", device=True, build_revisio
     }
 
 
+def posix_host_files(source="posix-source", deployment="14", archive_magic=b"!<arch>\n" + bytes(24)):
+    return {
+        "webrtc/NOTICE": b"POSIX notice",
+        "webrtc/VERSIONS": f"WEBRTC_BUILD_VERSION=155.8059.2.0\nWEBRTC_COMMIT={source}\n".encode(),
+        "webrtc/DEPS": f"MACOS_DEPLOYMENT_TARGET={deployment}\nIOS_DEPLOYMENT_TARGET=14.0\n".encode(),
+        "webrtc/include/api/peer_connection_interface.h": b"// header",
+        "webrtc/lib/libwebrtc.a": archive_magic,
+        XCFRAMEWORK + "Info.plist": b"unused framework",
+    }
+
+
 class FetchWebRtcTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -84,6 +95,8 @@ class FetchWebRtcTest(unittest.TestCase):
         (self.root / "third_party").mkdir()
         self.android = archive({"META-INF/NOTICE": "Android notice"})
         self.windows = archive({"webrtc/VERSIONS": "WEBRTC_COMMIT=host-source\n"})
+        self.linux = tarball(posix_host_files())
+        self.macos = tarball(posix_host_files())
         self.ios = tarball(ios_files())
         self.lock = {
             "builder_repository": "https://example.invalid/producer",
@@ -99,6 +112,20 @@ class FetchWebRtcTest(unittest.TestCase):
                 "windows": {
                     "name": "webrtc.windows_x86_64.zip",
                     "sha256": hashlib.sha256(self.windows).hexdigest(),
+                },
+                "linux": {
+                    "build_version": "posix-release",
+                    "webrtc_commit": "posix-source",
+                    "name": "webrtc.ubuntu-22.04_x86_64.tar.gz",
+                    "sha256": hashlib.sha256(self.linux).hexdigest(),
+                    "size": len(self.linux),
+                },
+                "macos": {
+                    "build_version": "posix-release",
+                    "webrtc_commit": "posix-source",
+                    "name": "webrtc.macos_arm64.tar.gz",
+                    "sha256": hashlib.sha256(self.macos).hexdigest(),
+                    "size": len(self.macos),
                 },
                 "ios": {
                     "build_version": "ios-release",
@@ -359,6 +386,173 @@ class FetchWebRtcTest(unittest.TestCase):
                 fetch("ios", self.root)
         self.assertEqual([], list((self.root / ".deps/cache").iterdir()))
         self.assertFalse((self.root / ".deps/webrtc/ios").exists())
+
+    def test_linux_and_macos_install_static_library_and_headers(self):
+        self.write_lock()
+        for platform, payload, name in (
+            ("linux", self.linux, "webrtc.ubuntu-22.04_x86_64.tar.gz"),
+            ("macos", self.macos, "webrtc.macos_arm64.tar.gz"),
+        ):
+            with self.subTest(platform=platform):
+                with patch("fetch_webrtc.urllib.request.urlopen", return_value=io.BytesIO(payload)) as download:
+                    fetch(platform, self.root)
+                download.assert_called_once_with(
+                    f"https://example.invalid/producer/releases/download/posix-release/{name}", timeout=60)
+                destination = self.root / ".deps/webrtc" / platform
+                self.assertTrue((destination / "webrtc/lib/libwebrtc.a").is_file())
+                self.assertTrue((destination / "webrtc/include/api/peer_connection_interface.h").is_file())
+                self.assertEqual(b"POSIX notice", (destination / "webrtc/NOTICE").read_bytes())
+                self.assertFalse((destination / "webrtc/Frameworks").exists())
+                self.assertEqual(self.lock["assets"][platform]["sha256"],
+                                 (destination / "verified.sha256").read_text().strip())
+                with patch("fetch_webrtc.urllib.request.urlopen") as cached:
+                    fetch(platform, self.root)
+                cached.assert_not_called()
+
+    def test_cached_posix_host_install_rechecks_source_and_library(self):
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", return_value=io.BytesIO(self.linux)):
+            fetch("linux", self.root)
+        self.lock["assets"]["linux"]["webrtc_commit"] = "different-posix-source"
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen") as download:
+            with self.assertRaisesRegex(RuntimeError, "source revision"):
+                fetch("linux", self.root)
+        download.assert_not_called()
+        self.lock["assets"]["linux"]["webrtc_commit"] = "posix-source"
+        self.write_lock()
+        library = self.root / ".deps/webrtc/linux/webrtc/lib/libwebrtc.a"
+        library.write_bytes(b"corrupt")
+        with patch("fetch_webrtc.urllib.request.urlopen") as download:
+            with self.assertRaisesRegex(RuntimeError, "static library is missing"):
+                fetch("linux", self.root)
+        download.assert_not_called()
+
+    def test_posix_host_skips_sysroot_and_perfetto_symlinks_and_rejects_other_links(self):
+        allowed = tarball(posix_host_files(), links=[
+            ("webrtc/include/build/linux/debian_bullseye_amd64-sysroot/usr/include/krb5.h", "mit-krb5/krb5.h"),
+            ("webrtc/include/third_party/perfetto/contrib/abi/export.h", "../../../../include/perfetto/public/abi/export.h"),
+        ])
+        self.linux = allowed
+        self.lock["assets"]["linux"]["sha256"] = hashlib.sha256(allowed).hexdigest()
+        self.lock["assets"]["linux"]["size"] = len(allowed)
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", return_value=io.BytesIO(self.linux)):
+            fetch("linux", self.root)
+        destination = self.root / ".deps/webrtc/linux"
+        self.assertEqual([], [path for path in destination.rglob("*") if path.is_symlink()])
+
+        rejected = tarball(posix_host_files(), links=[("webrtc/include/api/evil.h", "/etc/passwd")])
+        self.macos = rejected
+        self.lock["assets"]["macos"]["sha256"] = hashlib.sha256(rejected).hexdigest()
+        self.lock["assets"]["macos"]["size"] = len(rejected)
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", return_value=io.BytesIO(self.macos)):
+            with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+                fetch("macos", self.root)
+        self.assertFalse((self.root / ".deps/webrtc/macos/verified.sha256").exists())
+
+    def test_macos_rejects_deployment_target_above_host_minimum(self):
+        too_new = tarball(posix_host_files(deployment="15.0"))
+        self.macos = too_new
+        self.lock["assets"]["macos"]["sha256"] = hashlib.sha256(too_new).hexdigest()
+        self.lock["assets"]["macos"]["size"] = len(too_new)
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", return_value=io.BytesIO(self.macos)):
+            with self.assertRaisesRegex(RuntimeError, "deployment target exceeds"):
+                fetch("macos", self.root)
+        self.assertFalse((self.root / ".deps/webrtc/macos/verified.sha256").exists())
+
+    def test_posix_toolchain_verifies_clang_symlinks_libcxx_tree_and_provenance(self):
+        import base64
+        files = posix_host_files()
+        files["webrtc/VERSIONS"] = (
+            b"WEBRTC_BUILD_VERSION=155.8059.2.0\n"
+            b"WEBRTC_COMMIT=posix-source\n"
+            b"WEBRTC_SRC_TOOLS_COMMIT=tools-pin\n"
+            b"WEBRTC_SRC_BUILDTOOLS_COMMIT=buildtools-pin\n"
+            b"WEBRTC_SRC_THIRD_PARTY_LIBCXX_SRC_COMMIT=libcxx-pin-123456\n"
+        )
+        host_tar = tarball(files)
+        clang_tar = tarball({"bin/clang": b"#!/bin/sh\n"}, links=[("bin/clang++", "clang")])
+        libcxx_files = {
+            "LICENSE.TXT": b"Apache-2.0 WITH LLVM-exception\n",
+            "include/string": b"// string\n",
+        }
+        tree_state = hashlib.sha256()
+        for rel in sorted(libcxx_files):
+            digest_hex = hashlib.sha256(libcxx_files[rel]).hexdigest()
+            tree_state.update(f"{rel}:{digest_hex}\n".encode("utf-8"))
+        tree_sha = tree_state.hexdigest()
+        libcxx_cache_tar = tarball(libcxx_files)
+        cache = self.root / ".deps/cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / f"{tree_sha}-libcxx-libcxx-pin-1.tar.gz").write_bytes(libcxx_cache_tar)
+
+        config_site = b"#define _LIBCPP_ABI_NAMESPACE __Cr\n"
+        assertion_handler = b"#define _LIBCPP_ASSERTION_HANDLER(m) __builtin_trap()\n"
+        url_map = {
+            "https://example.invalid/producer/releases/download/posix-release/webrtc.ubuntu-22.04_x86_64.tar.gz": host_tar,
+            "https://example.invalid/clang.tar.gz": clang_tar,
+            "https://example.invalid/config_site": base64.b64encode(config_site),
+            "https://example.invalid/assertion_handler": base64.b64encode(assertion_handler),
+        }
+        self.lock["assets"]["linux"] = {
+            "build_version": "posix-release",
+            "webrtc_commit": "posix-source",
+            "name": "webrtc.ubuntu-22.04_x86_64.tar.gz",
+            "sha256": hashlib.sha256(host_tar).hexdigest(),
+            "size": len(host_tar),
+            "toolchain": {
+                "tools_commit": "tools-pin",
+                "buildtools_commit": "buildtools-pin",
+                "archives": [{
+                    "name": "clang.tar.gz",
+                    "url": "https://example.invalid/clang.tar.gz",
+                    "sha256": hashlib.sha256(clang_tar).hexdigest(),
+                    "size": len(clang_tar),
+                }],
+                "libcxx": {
+                    "repository": "https://example.invalid/libcxx.git",
+                    "commit": "libcxx-pin-123456",
+                    "tree_sha256": tree_sha,
+                    "config_site": {
+                        "url": "https://example.invalid/config_site",
+                        "sha256": hashlib.sha256(config_site).hexdigest(),
+                        "size": len(config_site),
+                    },
+                    "assertion_handler": {
+                        "url": "https://example.invalid/assertion_handler",
+                        "sha256": hashlib.sha256(assertion_handler).hexdigest(),
+                        "size": len(assertion_handler),
+                    },
+                },
+            },
+        }
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", side_effect=lambda u, timeout=60: io.BytesIO(url_map[u])):
+            fetch("linux", self.root)
+        dest = self.root / ".deps/webrtc/linux"
+        self.assertTrue((dest / "clang/bin/clang++").is_symlink())
+        self.assertEqual(config_site, (dest / "libcxx/include/__config_site").read_bytes())
+        self.assertEqual(assertion_handler, (dest / "libcxx/include/__assertion_handler").read_bytes())
+
+        # Tampering with __config_site on a stamped install must fail closed.
+        (dest / "libcxx/include/__config_site").write_bytes(b"tampered")
+        with patch("fetch_webrtc.urllib.request.urlopen") as download:
+            with self.assertRaisesRegex(RuntimeError, "__config_site is missing or modified"):
+                fetch("linux", self.root)
+        download.assert_not_called()
+
+        # Escaping relative symlinks inside a Clang archive must fail closed.
+        escaping = tarball({"bin/clang": b"#!/bin/sh\n"}, links=[("bin/clang++", "../../outside")])
+        url_map["https://example.invalid/clang.tar.gz"] = escaping
+        self.lock["assets"]["linux"]["toolchain"]["archives"][0]["sha256"] = hashlib.sha256(escaping).hexdigest()
+        self.lock["assets"]["linux"]["toolchain"]["archives"][0]["size"] = len(escaping)
+        self.write_lock()
+        with patch("fetch_webrtc.urllib.request.urlopen", side_effect=lambda u, timeout=60: io.BytesIO(url_map[u])):
+            with self.assertRaisesRegex(RuntimeError, "Unsafe dependency archive link"):
+                fetch("linux", self.root)
 
 
 if __name__ == "__main__":

@@ -79,7 +79,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			NativeABI uint32 `json:"native_abi"`
 			Capture   bool   `json:"capture_implemented"`
 			Streaming bool   `json:"network_streaming_implemented"`
-		}{"m0-webrtc-lan", runtime.GOOS + "/" + runtime.GOARCH, media.ABIVersion(), windowsaudio.Available(), runtime.GOOS == "windows" && runtime.GOARCH == "amd64"})
+		}{"m0-webrtc-lan", runtime.GOOS + "/" + runtime.GOARCH, media.ABIVersion(), windowsaudio.Available(), streamingSupported()})
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -123,4 +123,10 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "Unknown command %q; use doctor, rtc-check, devices, bridge-devices, bridge-check, identity, capture, tone, or stream.\n", args[0])
 		return 2
 	}
+}
+
+func streamingSupported() bool {
+	return (runtime.GOOS == "windows" && runtime.GOARCH == "amd64") ||
+		(runtime.GOOS == "linux" && runtime.GOARCH == "amd64") ||
+		(runtime.GOOS == "darwin" && runtime.GOARCH == "arm64")
 }
