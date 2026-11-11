@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"unicode/utf8"
 )
@@ -14,7 +15,7 @@ import (
 const launchAgentLabel = "com.maskarauder.micdrop.host"
 
 func launchAgentPlist(exePath string) ([]byte, error) {
-	if !filepath.IsAbs(exePath) {
+	if !path.IsAbs(exePath) || exePath == "/" || path.Clean(exePath) != exePath {
 		return nil, errors.New("startup requires an absolute application path")
 	}
 	if len(exePath) > 1024 || !utf8.ValidString(exePath) {

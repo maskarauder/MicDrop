@@ -49,8 +49,8 @@ func TestLaunchAgentLifecycleAndSafety(t *testing.T) {
 	if err := setLaunchAgentAt(agentsDir, exe, false); err != nil {
 		t.Fatal(err)
 	}
-	// Relative and control-character paths must be rejected.
-	for _, bad := range []string{"relative/MicDrop", "/Applications/MicDrop\nEvil", "/Applications/MicDrop\x00"} {
+	// Relative, non-clean, root, Windows-style, and control-character paths must be rejected.
+	for _, bad := range []string{"relative/MicDrop", "/", "/Applications/../tmp/MicDrop", `C:\MicDrop\MicDrop.exe`, "/Applications/MicDrop\nEvil", "/Applications/MicDrop\x00"} {
 		if _, err := launchAgentPlist(bad); err == nil {
 			t.Fatalf("accepted invalid executable path %q", bad)
 		}
