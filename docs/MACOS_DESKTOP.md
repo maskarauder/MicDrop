@@ -66,3 +66,19 @@ open build/macos-app/MicDrop.app
 ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop doctor
 ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop rtc-check
 ```
+
+## UI Preview
+
+Rendered automatically by `go test ./internal/desktop` on `macos-26` using synthetic test fixtures:
+
+| Audio | Connection |
+| --- | --- |
+| ![MicDrop macOS Audio tab](images/macos-desktop/audio.png) | ![MicDrop macOS Connection tab](images/macos-desktop/connection.png) |
+
+| Phones & QR Pairing | Options |
+| --- | --- |
+| ![MicDrop macOS Phones tab](images/macos-desktop/phones.png) | ![MicDrop macOS Options tab](images/macos-desktop/options.png) |
+
+| Connected Phone Settings Editor |
+| --- |
+| ![MicDrop macOS Phone Settings editor](images/macos-desktop/device-settings.png) |
