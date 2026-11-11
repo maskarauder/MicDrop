@@ -21,13 +21,37 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	args := os.Args[1:]
-	if len(args) == 0 && strings.EqualFold(filepath.Base(os.Args[0]), "MicDrop.exe") {
-		args = []string{"desktop"}
-	}
+	args := defaultArgs(os.Args[0], os.Args[1:], runtime.GOOS)
 	code := runContext(ctx, args, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+func defaultArgs(arg0 string, args []string, goos string) []string {
+	base := filepath.Base(arg0)
+	if goos == "windows" {
+		if idx := strings.LastIndexAny(arg0, `/\`); idx >= 0 {
+			base = arg0[idx+1:]
+		}
+		if len(args) == 0 && strings.EqualFold(base, "MicDrop.exe") {
+			return []string{"desktop"}
+		}
+		return args
+	}
+	if goos == "darwin" && base == "MicDrop" {
+		filtered := args
+		if len(filtered) > 0 && strings.HasPrefix(filtered[0], "-psn_") {
+			filtered = filtered[1:]
+		}
+		if len(filtered) == 0 {
+			return []string{"desktop"}
+		}
+		if len(filtered) == 1 && filtered[0] == "--background" {
+			return []string{"desktop", "--background"}
+		}
+		return filtered
+	}
+	return args
 }
 
 func run(args []string, stdout, stderr io.Writer) int {

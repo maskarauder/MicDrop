@@ -1,4 +1,4 @@
-// Package desktop owns the Windows desktop host's preferences and lifecycle.
+// Package desktop owns the desktop host's preferences and lifecycle.
 // It does not process audio, store credentials, or authorize phone capture.
 package desktop
 
@@ -34,7 +34,7 @@ func Defaults() Settings {
 func Directory() (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil || !filepath.IsAbs(base) {
-		return "", errors.New("Windows user data directory is unavailable")
+		return "", errors.New("user data directory is unavailable")
 	}
 	return filepath.Join(base, "MicDrop"), nil
 }

@@ -272,6 +272,31 @@ encrypted with a user-only (`0600`) AES-256-GCM master key and guarded by `flock
 See [PLATFORM_AUDIO.md](PLATFORM_AUDIO.md) for PipeWire/PulseAudio `module-null-sink`
 and macOS CoreAudio Process Tap / BlackHole virtual cable setup.
 
+### macOS desktop app (`MicDrop.app`)
+
+On Apple Silicon macOS (macOS 14.2+), the same `apps/windows-host` package also
+compiles the native AppKit desktop app (`MicDrop.app`) sharing `internal/desktop`
+with full feature parity to `MicDrop.exe` (audio routing, LAN/remote config, QR
+pairing, phone settings editor, SF Symbols menu bar item, and per-user
+`LaunchAgents` login startup). Assemble and verify the bundle with
+`tools/macos_app_bundle.py`:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=14.2 CGO_ENABLED=1 go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
+python3 tools/macos_app_bundle.py build \
+  --executable build/macos-app/MicDrop-bin \
+  --rtc-dylib build/native/native/rtc/libmicdrop_rtc.dylib \
+  --webrtc-notice .deps/webrtc/macos/webrtc/NOTICE \
+  --webrtc-versions .deps/webrtc/macos/webrtc/VERSIONS \
+  --output-app build/macos-app/MicDrop.app
+rm -f build/macos-app/MicDrop-bin
+codesign --force --sign - build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib
+codesign --force --sign - build/macos-app/MicDrop.app
+```
+
+See [macOS desktop](MACOS_DESKTOP.md) for bundle details, TCC privacy keys, and
+menu-bar / LaunchAgent behavior.
+
 ## Android app
 
 Use JDK 17 and the Android SDK. Install the SDK and NDK versions in the

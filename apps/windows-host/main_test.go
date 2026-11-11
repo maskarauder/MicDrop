@@ -86,3 +86,32 @@ func TestStreamRejectsUnsupportedPlatformBeforeListening(t *testing.T) {
 		t.Fatalf("unsupported streaming returned %d", code)
 	}
 }
+
+func TestDefaultDesktopLaunchArguments(t *testing.T) {
+	cases := []struct {
+		arg0 string
+		args []string
+		goos string
+		want []string
+	}{
+		{`C:\Users\Alice\AppData\Local\Programs\MicDrop\MicDrop.exe`, nil, "windows", []string{"desktop"}},
+		{`C:\Users\Alice\AppData\Local\Programs\MicDrop\windows-host.exe`, nil, "windows", nil},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", nil, "darwin", []string{"desktop"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"-psn_0_12345"}, "darwin", []string{"desktop"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"--background"}, "darwin", []string{"desktop", "--background"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"version"}, "darwin", []string{"version"}},
+		{"/usr/local/bin/micdrop-host", nil, "darwin", nil},
+		{"/usr/local/bin/micdrop-host", nil, "linux", nil},
+	}
+	for _, tc := range cases {
+		got := defaultArgs(tc.arg0, tc.args, tc.goos)
+		if len(got) != len(tc.want) {
+			t.Fatalf("defaultArgs(%q, %v, %q) = %v, want %v", tc.arg0, tc.args, tc.goos, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("defaultArgs(%q, %v, %q)[%d] = %q, want %q", tc.arg0, tc.args, tc.goos, i, got[i], tc.want[i])
+			}
+		}
+	}
+}

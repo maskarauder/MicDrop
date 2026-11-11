@@ -169,6 +169,13 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: go vet ./...
+      - name: Check native macOS desktop controls
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          MICDROP_DESKTOP_PREVIEW_DIR: build/macos-desktop-preview
+        run: go test -count=1 -v ./internal/desktop
       - name: Check native Windows desktop controls
         if: runner.os == 'Windows'
         shell: pwsh
@@ -246,6 +253,40 @@ jobs:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
           name: macos-arm64-host
           path: build/host/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build, sign, and verify macOS desktop app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p build/macos-app build/macos-app-dist
+          go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
+          python3 tools/macos_app_bundle.py build \
+            --executable build/macos-app/MicDrop-bin \
+            --rtc-dylib build/native/native/rtc/libmicdrop_rtc.dylib \
+            --webrtc-notice .deps/webrtc/macos/webrtc/NOTICE \
+            --webrtc-versions .deps/webrtc/macos/webrtc/VERSIONS \
+            --output-app build/macos-app/MicDrop.app
+          rm -f build/macos-app/MicDrop-bin
+          codesign --force --sign - build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib
+          codesign --force --sign - build/macos-app/MicDrop.app
+          codesign --verify --deep --strict --verbose=2 build/macos-app/MicDrop.app
+          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop version
+          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop doctor
+          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop rtc-check
+          python3 tools/macos_app_bundle.py zip \
+            --app build/macos-app/MicDrop.app \
+            --output build/macos-app-dist/MicDrop-macos-arm64-app.zip
+      - name: Retain macOS desktop app
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: macos-arm64-app
+          path: build/macos-app-dist/MicDrop-macos-arm64-app.zip
           if-no-files-found: error
           retention-days: 14
       - name: Build Windows desktop app
