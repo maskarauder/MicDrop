@@ -248,12 +248,34 @@ jobs:
           ./build/host/micdrop-host tone --output build/ci-tone.wav --duration 25ms
       - name: Verify live Linux PulseAudio loopback and virtual cable audio
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
           if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v pactl >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive sudo apt-get update
-            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              for mirror in \
+                "https://mirrors.edge.kernel.org/ubuntu/" \
+                "https://ftp.osuosl.org/pub/ubuntu/" \
+                "http://azure.archive.ubuntu.com/ubuntu/" \
+                "https://archive.ubuntu.com/ubuntu/"; do
+                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
+                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
+                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+                  break
+                fi
+              done
+            fi
+            APT_OPTS=(
+              -o Acquire::ForceIPv4=true
+              -o Acquire::Retries=1
+              -o Acquire::http::Timeout=5
+              -o Acquire::https::Timeout=5
+              -o Acquire::http::No-Cache=false
+              -o Acquire::https::No-Cache=false
+            )
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends pulseaudio pulseaudio-utils
           fi
           PA_DIR="$RUNNER_TEMP/micdrop-pulse"
           mkdir -m 700 -p "$PA_DIR/runtime" "$PA_DIR/state"
@@ -261,6 +283,7 @@ jobs:
           export PULSE_RUNTIME_PATH="$PA_DIR/runtime"
           export PULSE_STATE_PATH="$PA_DIR/state"
           export PULSE_SERVER="unix:$PA_DIR/runtime/native"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$PA_DIR/no-dbus"
           PA_PID=""
           cleanup_pulse() {
             rc=$?
@@ -278,7 +301,7 @@ jobs:
             fi
           }
           trap cleanup_pulse EXIT
-          pulseaudio --daemonize=no --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
+          env -u RUNNER_TRACKING_ID pulseaudio --daemonize=no --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
             -L "module-native-protocol-unix auth-anonymous=1 socket=$PA_DIR/runtime/native" \
             -L "module-null-sink sink_name=MicDropDesktop rate=48000 channels=2 sink_properties=device.description=MicDrop_Desktop" \
             -L "module-null-sink sink_name=MicDropCable rate=48000 channels=2 sink_properties=device.description=MicDrop_Cable" \
