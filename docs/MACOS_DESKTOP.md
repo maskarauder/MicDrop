@@ -2,6 +2,18 @@
 
 `MicDrop.app` is the native Apple Silicon (`arm64`, macOS 14.2+) desktop host UI. It shares the same Go host controller, settings file schema (`desktop-v1.json`), pairing keystore, LAN discovery, remote rendezvous transport, and phone settings editor as the Windows desktop app (`MicDrop.exe`) and the CLI host (`micdrop-host`).
 
+## Hardware Testing Status & Feedback Wanted
+
+> [!IMPORTANT]
+> **Apple Silicon hardware feedback requested:** `MicDrop.app` and `micdrop-host` are built and verified in GitHub Actions on `macos-26` (`arm64` Mach-O & ad-hoc `codesign` validation, live AppKit window/control contracts with rendered tab screenshots, and native C++ WebRTC Opus/DTLS-SRTP loopback), **but maintainer testing does not yet include physical Apple Silicon Mac hardware.**
+>
+> If you test `MicDrop.app` or `micdrop-host` on an M-series Mac (macOS 14.2+), please share what works or fails in a [GitHub Issue](https://github.com/maskarauder/MicDrop/issues):
+> - Your macOS version, Mac chip model, and phone OS/model.
+> - Whether the macOS **System Audio Recording** and **Local Network** permission prompts appear and capture desktop playback across built-in speakers, USB/wired DACs, or AirPods/Bluetooth outputs.
+> - Optional phone microphone return through a user-space virtual audio cable (such as BlackHole 2ch) into Discord, Zoom, or QuickTime/Voice Memos.
+> - Menu bar (`NSStatusItem`), Notification Center alerts, and optional login `LaunchAgent` startup behavior.
+> - Never attach pairing invitations, QR screenshots containing live tokens, or relay credentials.
+
 ## Capabilities and Design
 
 - **Native AppKit UI (`internal/desktop/appkit_darwin_arm64.m`, `ui_darwin_arm64.go`, `phone_settings_darwin_arm64.go`):**

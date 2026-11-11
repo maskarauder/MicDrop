@@ -53,7 +53,9 @@ or rendezvous runners.
   Then pass `--microphone-device MicDropMic` to `micdrop-host stream` and choose
   **Monitor of MicDrop_Microphone** (or use `pw-link` / `pactl load-module module-remap-source`)
   inside the consuming application. Passing the same sink for desktop capture
-  and microphone return is rejected before opening audio.
+  and microphone return is rejected before opening audio. CI (`ubuntu-24.04`)
+  verifies live sink discovery, virtual-mic bridge playback, and `.monitor`
+  PCM loopback capture against an isolated PulseAudio server.
 
 ## macOS host
 
@@ -64,14 +66,19 @@ AudioUnits without kernel extensions:
 - **Desktop playback capture:** Enumerates output `AudioDeviceID` endpoints by
   persistent CoreAudio `kAudioDevicePropertyDeviceUID`, creates a private
   unmuted `CATapDescription` (`initWithProcesses:@[] andDeviceUID:withStream:0`)
-  and private aggregate device (`AudioHardwareCreateProcessTap` +
-  `AudioHardwareCreateAggregateDevice`), and pulls non-allocating `Float32`
+  and private aggregate device (`AudioHardwareCreateAggregateDevice` +
+  `AudioHardwareCreateProcessTap`), and pulls non-allocating `Float32`
   frames on a real-time input `HALOutput` AudioUnit callback. macOS prompts for
   System Audio Recording permission on first capture.
 - **Microphone return cable:** Renders returned `Float32` PCM into an explicitly
   selected output device UID (for example a user-space CoreAudio AudioServerPlugIn
   virtual cable such as BlackHole 2ch). Missing or duplicate explicit UIDs fail
   closed without falling back to the Mac's speakers.
+- **Hardware validation status:** `macos-26` CI verifies native WebRTC media
+  loopback, AppKit desktop UI controls, and `MicDrop.app` bundle signing, while
+  live CoreAudio Process Tap + TCC permission and virtual-cable sessions await
+  community feedback on physical Apple Silicon hardware (see
+  [macOS desktop](MACOS_DESKTOP.md#hardware-testing-status--feedback-wanted)).
 
 ## Android playback
 

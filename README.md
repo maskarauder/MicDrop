@@ -1,21 +1,27 @@
 # MicDrop
 
 Use your Android phone or iPhone—and its connected headphones or headset—as a
-wireless speaker, microphone, or two-way headset for your Windows 11 PC.
+wireless speaker, microphone, or two-way headset for your Windows 11 PC, with
+experimental Linux x64 CLI and Apple Silicon macOS 14.2+ desktop host support.
 
 **Status: public beta.** Windows and Android LAN/remote streaming have passed
 functional acceptance on tested hardware; the iPhone app has passed Apple CI and
 initial LAN duplex/mute checks, with broader physical route, locked-screen, and
-remote device testing still underway.
+remote device testing still underway. The Linux x64 CLI host (`micdrop-host`) is
+verified against live PulseAudio/PipeWire loopback in CI, and the Apple Silicon
+macOS 14.2+ host (`MicDrop.app` and `micdrop-host`) is verified in `macos-26` CI
+(AppKit UI, bundle/signing, and WebRTC loopback) — **community feedback from
+physical Apple Silicon Mac hardware is actively requested** (see
+[macOS desktop](docs/MACOS_DESKTOP.md#hardware-testing-status--feedback-wanted)).
 
 ## Features
 
 - **Listen, talk, or both:** Stream desktop audio to your phone, send your phone
-  or headset microphone back to Windows apps, or run full duplex over WebRTC/Opus.
+  or headset microphone back to desktop apps, or run full duplex over WebRTC/Opus.
 - **No account or cloud required:** Works directly over your local Wi-Fi/LAN
   with automatic host discovery and no internet dependency.
 - **Private pairing:** Scan a QR code or paste an invitation link on your phone
-  and approve the device on Windows. Revoke paired phones anytime.
+  and approve the device on your desktop host. Revoke paired phones anytime.
 - **Built for daily use:** Choose audio outputs and inputs from the phone, mute,
   pause/resume, keep streaming with the screen off, and recover automatically
   from brief Wi-Fi or headset interruptions.
@@ -24,7 +30,7 @@ remote device testing still underway.
 
 ## Download & Quick Start
 
-Download matching Windows and phone packages from the latest release on the
+Download matching desktop and phone packages from the latest release on the
 **[Releases page](https://github.com/maskarauder/MicDrop/releases)**:
 
 | Platform | Download | Notes |
@@ -32,7 +38,8 @@ Download matching Windows and phone packages from the latest release on the
 | **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
 | **Android 12+ (arm64)** | `MicDrop-*-android-arm64-dev.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
 | **iPhone (iOS 17+ arm64)** | `MicDrop-*-ios-arm64-unsigned.ipa` | Sideload with your Apple ID via AltStore, SideStore, Sideloadly, or Xcode ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
-| **Linux (optional)** | Built from source / CI artifact | Self-hosted remote rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
+| **macOS 14.2+ (Apple Silicon arm64)** | Built from source / CI artifact (`macos-arm64-app`, `macos-arm64-host`) | Experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md)); Apple Silicon hardware feedback welcome |
+| **Linux (x64)** | Built from source / CI artifact (`linux-x64-host`) | PipeWire/PulseAudio CLI host ([audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
 
 ### Setup in 4 Steps
 

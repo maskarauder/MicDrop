@@ -176,6 +176,15 @@ jobs:
           CGO_ENABLED: '1'
           MICDROP_DESKTOP_PREVIEW_DIR: build/macos-desktop-preview
         run: go test -count=1 -v ./internal/desktop
+      - name: Retain macOS desktop UI preview
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.upload_artifacts == true }}
+          name: macos-desktop-preview
+          path: build/macos-desktop-preview/*.png
+          if-no-files-found: error
+          retention-days: 14
       - name: Check native Windows desktop controls
         if: runner.os == 'Windows'
         shell: pwsh
@@ -237,6 +246,126 @@ jobs:
           ./build/host/micdrop-host doctor
           ./build/host/micdrop-host rtc-check
           ./build/host/micdrop-host tone --output build/ci-tone.wav --duration 25ms
+      - name: Verify live Linux PulseAudio loopback and virtual cable audio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v pactl >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive sudo apt-get update
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+          fi
+          PA_DIR="$RUNNER_TEMP/micdrop-pulse"
+          mkdir -m 700 -p "$PA_DIR/runtime" "$PA_DIR/state"
+          export XDG_RUNTIME_DIR="$PA_DIR/runtime"
+          export PULSE_RUNTIME_PATH="$PA_DIR/runtime"
+          export PULSE_STATE_PATH="$PA_DIR/state"
+          export PULSE_SERVER="unix:$PA_DIR/runtime/native"
+          PA_PID=""
+          cleanup_pulse() {
+            if [ -n "$PA_PID" ]; then
+              kill "$PA_PID" >/dev/null 2>&1 || true
+              wait "$PA_PID" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_pulse EXIT
+          pulseaudio --daemonize=no --disallow-exit --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
+            -L "module-native-protocol-unix auth-anonymous=1 socket=$PA_DIR/runtime/native" \
+            -L "module-null-sink sink_name=MicDropDesktop rate=48000 channels=2 sink_properties=device.description=MicDrop_Desktop" \
+            -L "module-null-sink sink_name=MicDropCable rate=48000 channels=2 sink_properties=device.description=MicDrop_Cable" \
+            -L "module-remap-source source_name=MicDropVirtualMic master=MicDropCable.monitor source_properties=device.description=MicDrop_Virtual_Mic" &
+          PA_PID=$!
+          for _ in $(seq 1 50); do
+            if [ -S "$PA_DIR/runtime/native" ] && pactl info >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$PA_PID" 2>/dev/null; then
+              cat "$PA_DIR/pulse.log" >&2 || true
+              exit 1
+            fi
+            sleep 0.1
+          done
+          if ! pactl info >/dev/null 2>&1; then
+            cat "$PA_DIR/pulse.log" >&2 || true
+            exit 1
+          fi
+          pactl set-default-sink MicDropDesktop
+          pactl set-default-source MicDropVirtualMic
+
+          mkdir -p build/linux-audio-check
+          ./build/host/micdrop-host devices > build/linux-audio-check/devices.json
+          ./build/host/micdrop-host bridge-devices > build/linux-audio-check/bridge-devices.json
+
+          # Missing explicit endpoints must fail closed rather than falling back to default.
+          if ./build/host/micdrop-host capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
+            echo "Expected missing explicit sink to fail closed" >&2
+            exit 1
+          fi
+
+          # Simultaneously inject synthetic stereo tone into MicDropCable and capture from its monitor.
+          ./build/host/micdrop-host capture \
+            --device MicDropCable \
+            --duration 2500ms \
+            --output build/linux-audio-check/cable-loopback.wav \
+            > build/linux-audio-check/capture-cable.json &
+          CAP_PID=$!
+          sleep 0.1
+          ./build/host/micdrop-host bridge-check \
+            --render-device MicDropCable \
+            --duration 2500ms \
+            > build/linux-audio-check/bridge-cable.json
+          wait "$CAP_PID"
+
+          # Verify default output sink resolution (no --device flag) with live audio.
+          ./build/host/micdrop-host capture \
+            --duration 2500ms \
+            > build/linux-audio-check/capture-default.json &
+          DEF_PID=$!
+          sleep 0.1
+          ./build/host/micdrop-host bridge-check \
+            --render-device MicDropDesktop \
+            --duration 2500ms \
+            > build/linux-audio-check/bridge-default.json
+          wait "$DEF_PID"
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          base = Path("build/linux-audio-check")
+          devices = json.loads((base / "devices.json").read_text(encoding="utf-8"))
+          by_id = {d["id"]: d for d in devices}
+          assert by_id["MicDropDesktop"]["default_multimedia"] is True, devices
+          assert by_id["MicDropCable"]["default_multimedia"] is False, devices
+
+          bridge_devs = json.loads((base / "bridge-devices.json").read_text(encoding="utf-8"))
+          render_ids = {d["id"] for d in bridge_devs["render_endpoints"]}
+          input_ids = {d["id"] for d in bridge_devs["recording_endpoints"]}
+          assert {"MicDropDesktop", "MicDropCable"} <= render_ids, bridge_devs
+          assert "MicDropVirtualMic" in input_ids, bridge_devs
+          assert "MicDropCable.monitor" not in input_ids, bridge_devs
+
+          bridge_report = json.loads((base / "bridge-cable.json").read_text(encoding="utf-8"))
+          assert bridge_report["render_device"]["id"] == "MicDropCable", bridge_report
+          assert bridge_report["submitted_frames"] == 120000, bridge_report
+
+          cap_cable = json.loads((base / "capture-cable.json").read_text(encoding="utf-8"))
+          assert cap_cable["device"]["id"] == "MicDropCable", cap_cable
+          assert cap_cable["frames"] >= 48000, cap_cable
+          assert len(cap_cable["channel_levels"]) == 2, cap_cable
+          for level in cap_cable["channel_levels"]:
+              assert 0.02 <= level["peak_linear"] <= 0.08, cap_cable
+              assert level["rms_linear"] > 0.005, cap_cable
+          wav_path = Path(cap_cable["wav_file"])
+          assert wav_path.is_file() and wav_path.stat().st_size > 192000, wav_path
+
+          cap_def = json.loads((base / "capture-default.json").read_text(encoding="utf-8"))
+          assert cap_def["device"]["id"] == "MicDropDesktop", cap_def
+          assert cap_def["device"]["default_multimedia"] is True, cap_def
+          assert cap_def["frames"] >= 48000, cap_def
+          assert cap_def["channel_levels"][0]["peak_linear"] >= 0.02, cap_def
+          print("Verified live Linux PulseAudio sink discovery, virtual mic bridge, and PCM loopback capture.")
+          PY
       - name: Retain Linux CLI host
         if: runner.os == 'Linux'
         uses: ./.github/actions/store-artifact
