@@ -624,10 +624,11 @@ standalone rendezvous service and systemd verification and the Android arm64 APK
 lint and JVM contracts.
 A separate API 35 KVM emulator job on `ubuntu-24.04` checks Android Keystore signing
 and Conscrypt mutual TLS. Linux checks the known-offset measurement fixtures in an
-isolated Python virtual environment. Windows, Linux (`linux-x64-host`), and macOS
-(`macos-arm64-host`) jobs also build and smoke-test the packaged Go host with its
-native WebRTC shared library (`doctor`, `rtc-check`, and `tone`) without requiring a
-physical audio endpoint.
+isolated Python virtual environment. Windows, Linux (`linux-x64-host`:
+`MicDrop-linux-x64-host.tar.gz`), and macOS (`macos-arm64-host`:
+`MicDrop-macos-arm64-host.tar.gz`) jobs also package, extract, and smoke-test the
+Go CLI host with its native WebRTC shared library (`doctor`, `rtc-check`, and
+`tone`) without requiring a physical audio endpoint.
 
 On pushes to `main` and manual workflow runs (`upload_artifacts` defaults to `true`),
 CI uploads build outputs and verification reports to GitHub Actions for 14 days

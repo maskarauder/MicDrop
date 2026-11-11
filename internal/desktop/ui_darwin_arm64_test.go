@@ -425,3 +425,95 @@ func TestDarwinDesktopControls(t *testing.T) {
 		t.Fatalf("unexpected saved settings: %+v err=%v", saved, err)
 	}
 }
+
+func TestDarwinApplicationShouldTerminateDefersUntilStopped(t *testing.T) {
+	const nsTerminateLater = 2 // NSTerminateCancel == 0, NSTerminateNow == 1, NSTerminateLater == 2.
+
+	started := make(chan struct{}, 1)
+	stopping := make(chan struct{}, 1)
+	allowStop := make(chan struct{})
+	finished := make(chan error, 1)
+
+	backend := Backend{
+		Run: func(ctx context.Context, _ Settings, _ <-chan Command, emit func(Event)) error {
+			emit(Event{Kind: "ready", Message: "LAN control ready (test host)"})
+			started <- struct{}{}
+			<-ctx.Done()
+			stopping <- struct{}{}
+			<-allowStop
+			return nil
+		},
+		Devices: func() ([]AudioDevice, error) {
+			return []AudioDevice{{ID: "speaker", Name: "MacBook Pro Speakers (test fixture)", Default: true}}, nil
+		},
+		RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+	}
+
+	directory := t.TempDir()
+	settings := Defaults()
+	settings.Notifications = false
+	if err := SaveSettings(directory, settings); err != nil {
+		t.Fatal(err)
+	}
+
+	darwinMainThread <- func() {
+		finished <- runWindow(backend, directory, true, true)
+	}
+
+	select {
+	case <-started:
+	case err := <-finished:
+		t.Fatalf("macOS desktop window did not start: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("macOS desktop window startup timed out")
+	}
+
+	uiDo := func(fn func()) {
+		done := make(chan struct{})
+		uiTestQueue <- func() {
+			fn()
+			close(done)
+		}
+		wakeTestQueue()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out dispatching onto AppKit main thread")
+		}
+	}
+
+	var reply int
+	uiDo(func() { reply = requestTerminateForTest() })
+	if reply != nsTerminateLater {
+		close(allowStop)
+		t.Fatalf("applicationShouldTerminate returned %d, want NSTerminateLater (%d)", reply, nsTerminateLater)
+	}
+
+	select {
+	case <-stopping:
+	case <-time.After(5 * time.Second):
+		close(allowStop)
+		t.Fatal("applicationShouldTerminate did not start stopping the host")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	var approvedWhileStopping int
+	uiDo(func() { approvedWhileStopping = terminateApprovedCountForTest() })
+	if approvedWhileStopping != 0 {
+		close(allowStop)
+		t.Fatalf("termination approved before host cleanup finished (count=%d)", approvedWhileStopping)
+	}
+
+	close(allowStop)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("runWindow returned error on system terminate: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("system termination did not finish after host cleanup")
+	}
+	if got := terminateApprovedCountForTest(); got != 1 {
+		t.Fatalf("terminateApprovedCount = %d, want 1", got)
+	}
+}

@@ -139,12 +139,14 @@ jobs:
       - name: Validate native dependency selection and checksums
         if: runner.os == 'Linux'
         run: python -m unittest discover -s tools -p 'test_fetch_webrtc.py' -v
-      - name: Validate iPhone bundle and Swift package pin checks
+      - name: Validate iPhone, macOS, and Unix host packaging checks
         if: runner.os == 'Linux'
         run: |
           python -m unittest discover -s tools -p 'test_ios_bundle.py' -v
           python -m unittest discover -s tools -p 'test_swiftpm_pins.py' -v
           python -m unittest discover -s tools -p 'test_ios_version.py' -v
+          python -m unittest discover -s tools -p 'test_macos_app_bundle.py' -v
+          python -m unittest discover -s tools -p 'test_package_unix_host.py' -v
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
       - name: Validate Android page-size rejection checks
         if: runner.os == 'Linux'
@@ -216,14 +218,15 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: go build -trimpath -o build/host/ ./apps/windows-host
-      - name: Build Unix CLI host and stage runtime payload
+      - name: Build and package Unix CLI host distribution
         if: runner.os != 'Windows'
         shell: bash
         env:
           CGO_ENABLED: '1'
         run: |
           set -euo pipefail
-          mkdir -p build/host
+          rm -rf build/host build/host-dist
+          mkdir -p build/host build/host-dist
           go build -trimpath -o build/host/micdrop-host ./apps/windows-host
           cp LICENSE NOTICE build/host/
           cp third_party/QR-CODE-NOTICE.txt third_party/DISCOVERY-NOTICES.txt third_party/WEBSOCKET-NOTICE.txt build/host/
@@ -232,26 +235,59 @@ jobs:
             cp .deps/webrtc/macos/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
             cp .deps/webrtc/macos/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
             codesign --force --sign - build/host/libmicdrop_rtc.dylib build/host/micdrop-host
+            python3 tools/package_unix_host.py package \
+              --platform macos-arm64 \
+              --stage-dir build/host \
+              --output build/host-dist/MicDrop-macos-arm64-host.tar.gz
           else
             cp build/native/native/rtc/libmicdrop_rtc.so build/host/
             cp .deps/webrtc/linux/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
             cp .deps/webrtc/linux/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
+            python3 tools/package_unix_host.py package \
+              --platform linux-x64 \
+              --stage-dir build/host \
+              --output build/host-dist/MicDrop-linux-x64-host.tar.gz
           fi
-      - name: Verify Unix CLI host executable and native WebRTC library
+          rm -rf build/host
+      - name: Verify extracted Unix CLI host distribution
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          ./build/host/micdrop-host version
-          ./build/host/micdrop-host doctor
-          ./build/host/micdrop-host rtc-check
-          ./build/host/micdrop-host tone --output build/ci-tone.wav --duration 25ms
+          rm -rf build/host-extracted
+          mkdir -p build/host-extracted
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ARCHIVE="build/host-dist/MicDrop-macos-arm64-host.tar.gz"
+            EXTRACT_DIR="build/host-extracted/MicDrop-macos-arm64-host"
+            RTC_LIB="$EXTRACT_DIR/libmicdrop_rtc.dylib"
+            python3 tools/package_unix_host.py check --platform macos-arm64 --archive "$ARCHIVE"
+          else
+            ARCHIVE="build/host-dist/MicDrop-linux-x64-host.tar.gz"
+            EXTRACT_DIR="build/host-extracted/MicDrop-linux-x64-host"
+            RTC_LIB="$EXTRACT_DIR/libmicdrop_rtc.so"
+            python3 tools/package_unix_host.py check --platform linux-x64 --archive "$ARCHIVE"
+          fi
+          # Simulate actions/upload-artifact@v4 stripping outer file permissions before extraction.
+          chmod 0644 "$ARCHIVE"
+          tar -xzf "$ARCHIVE" -C build/host-extracted
+          HOST_BIN="$EXTRACT_DIR/micdrop-host"
+          test -x "$HOST_BIN"
+          test -x "$RTC_LIB"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            codesign --verify --strict --verbose=2 "$RTC_LIB" "$HOST_BIN"
+          fi
+          "$HOST_BIN" version
+          "$HOST_BIN" doctor
+          "$HOST_BIN" rtc-check
+          "$HOST_BIN" tone --output build/ci-tone.wav --duration 25ms
       - name: Verify live Linux PulseAudio loopback and virtual cable audio
         if: runner.os == 'Linux'
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
+          HOST_BIN="./build/host-extracted/MicDrop-linux-x64-host/micdrop-host"
+          test -x "$HOST_BIN"
           if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v pactl >/dev/null 2>&1; then
             if [ -f /etc/apt/apt-mirrors.txt ]; then
               for mirror in \
@@ -322,11 +358,11 @@ jobs:
           timeout 5s pactl set-default-source MicDropVirtualMic
 
           mkdir -p build/linux-audio-check
-          timeout 10s ./build/host/micdrop-host devices > build/linux-audio-check/devices.json
-          timeout 10s ./build/host/micdrop-host bridge-devices > build/linux-audio-check/bridge-devices.json
+          timeout 10s "$HOST_BIN" devices > build/linux-audio-check/devices.json
+          timeout 10s "$HOST_BIN" bridge-devices > build/linux-audio-check/bridge-devices.json
 
           # Missing explicit endpoints must fail closed rather than falling back to default.
-          if timeout 10s ./build/host/micdrop-host capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
+          if timeout 10s "$HOST_BIN" capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
             echo "Expected missing explicit sink to fail closed" >&2
             exit 1
           fi
@@ -334,13 +370,13 @@ jobs:
           # Simultaneously inject synthetic stereo tone into MicDropCable and capture from its monitor.
           # PulseAudio module-null-sink sleeps in 2s BLOCK_USEC intervals while idle, so allow 2.2s
           # for the sink thread to wake into low-latency streaming before starting the 2.5s capture.
-          timeout 20s ./build/host/micdrop-host bridge-check \
+          timeout 20s "$HOST_BIN" bridge-check \
             --render-device MicDropCable \
             --duration 6000ms \
             > build/linux-audio-check/bridge-cable.json &
           BRIDGE_PID=$!
           sleep 2.2
-          timeout 15s ./build/host/micdrop-host capture \
+          timeout 15s "$HOST_BIN" capture \
             --device MicDropCable \
             --duration 2500ms \
             --output build/linux-audio-check/cable-loopback.wav \
@@ -348,13 +384,13 @@ jobs:
           wait "$BRIDGE_PID"
 
           # Verify default output sink resolution (no --device flag) with live audio.
-          timeout 20s ./build/host/micdrop-host bridge-check \
+          timeout 20s "$HOST_BIN" bridge-check \
             --render-device MicDropDesktop \
             --duration 6000ms \
             > build/linux-audio-check/bridge-default.json &
           DEF_BRIDGE_PID=$!
           sleep 2.2
-          timeout 15s ./build/host/micdrop-host capture \
+          timeout 15s "$HOST_BIN" capture \
             --duration 2500ms \
             > build/linux-audio-check/capture-default.json
           wait "$DEF_BRIDGE_PID"
@@ -403,7 +439,7 @@ jobs:
         with:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
           name: linux-x64-host
-          path: build/host/*
+          path: build/host-dist/MicDrop-linux-x64-host.tar.gz
           if-no-files-found: error
           retention-days: 14
       - name: Retain macOS CLI host
@@ -412,7 +448,7 @@ jobs:
         with:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
           name: macos-arm64-host
-          path: build/host/*
+          path: build/host-dist/MicDrop-macos-arm64-host.tar.gz
           if-no-files-found: error
           retention-days: 14
       - name: Build, sign, and verify macOS desktop app bundle
@@ -422,7 +458,8 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           set -euo pipefail
-          mkdir -p build/macos-app build/macos-app-dist
+          rm -rf build/macos-app build/macos-app-dist build/macos-app-extracted
+          mkdir -p build/macos-app build/macos-app-dist build/macos-app-extracted
           go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
           python3 tools/macos_app_bundle.py build \
             --executable build/macos-app/MicDrop-bin \
@@ -433,13 +470,17 @@ jobs:
           rm -f build/macos-app/MicDrop-bin
           codesign --force --sign - build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib
           codesign --force --sign - build/macos-app/MicDrop.app
-          codesign --verify --deep --strict --verbose=2 build/macos-app/MicDrop.app
-          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop version
-          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop doctor
-          ./build/macos-app/MicDrop.app/Contents/MacOS/MicDrop rtc-check
           python3 tools/macos_app_bundle.py zip \
             --app build/macos-app/MicDrop.app \
             --output build/macos-app-dist/MicDrop-macos-arm64-app.zip
+          rm -rf build/macos-app
+          chmod 0644 build/macos-app-dist/MicDrop-macos-arm64-app.zip
+          ditto -x -k build/macos-app-dist/MicDrop-macos-arm64-app.zip build/macos-app-extracted
+          test -x build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop
+          codesign --verify --deep --strict --verbose=2 build/macos-app-extracted/MicDrop.app
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop version
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop doctor
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop rtc-check
       - name: Retain macOS desktop app
         if: runner.os == 'macOS'
         uses: ./.github/actions/store-artifact

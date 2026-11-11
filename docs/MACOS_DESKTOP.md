@@ -29,8 +29,8 @@
 
 ## Files and State Locations
 
-- **Desktop preferences & lock:** `~/Library/Caches/MicDrop/desktop-v1.json`, `desktop.lock`, and `~/Library/Caches/MicDrop/logs/`.
-- **Host identity, paired phones & remote config:** `~/Library/Application Support/MicDrop/` (mode `0700` directory, `0600` AES-256-GCM keystore envelope + `flock`).
+- **Desktop preferences, lock & logs:** `~/Library/Application Support/MicDrop/desktop-v1.json`, `desktop.lock`, and `~/Library/Application Support/MicDrop/logs/`.
+- **Host identity, paired phones & remote config:** `~/Library/Application Support/MicDrop/identity/` and `~/Library/Application Support/MicDrop/keystore/` (mode `0700` directories, `0600` AES-256-GCM keystore envelope + `flock`).
 - **Optional login LaunchAgent:** `~/Library/LaunchAgents/com.maskarauder.micdrop.host.plist` (created only when `Start host when I sign in to macOS` is enabled; removed when unchecked).
 
 ## Permissions on macOS 14.2+

@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -107,6 +108,7 @@ type desktopWindow struct {
 	busy, closing, destroyed   bool
 	modal                      bool
 	requestShow                atomic.Bool
+	releaseLock                func()
 	jobs                       chan uiResult
 	closed                     chan struct{}
 	devices                    []AudioDevice
@@ -262,10 +264,11 @@ func runWindow(backend Backend, directory string, background bool, headlessTest 
 	if alreadyRunning {
 		return nil
 	}
-	defer func() {
+	releaseLock := sync.OnceFunc(func() {
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
-	}()
+	})
+	defer releaseLock()
 
 	settings, err := LoadSettings(directory)
 	if err != nil {
@@ -278,6 +281,7 @@ func runWindow(backend Backend, directory string, background bool, headlessTest 
 		settings:     settings,
 		directory:    directory,
 		headlessTest: headlessTest,
+		releaseLock:  releaseLock,
 		jobs:         make(chan uiResult, 1),
 		closed:       make(chan struct{}),
 		labelID:      1000,
@@ -816,6 +820,10 @@ func (u *desktopWindow) tick() {
 	stopped, ready := state.Phase == "stopped", state.Phase == "ready"
 	if u.closing && stopped && !u.busy && !u.modal {
 		u.destroyed = true
+		<-u.controller.Stop()
+		if u.releaseLock != nil {
+			u.releaseLock()
+		}
 		C.md_app_stop_loop()
 		return
 	}
@@ -1111,4 +1119,12 @@ func capturePNGForTest(path string) bool {
 	cs := C.CString(path)
 	defer C.free(unsafe.Pointer(cs))
 	return C.md_ui_capture_png(cs) != 0
+}
+
+func requestTerminateForTest() int {
+	return int(C.md_ui_request_terminate_for_test())
+}
+
+func terminateApprovedCountForTest() int {
+	return int(C.md_ui_terminate_approved_count_for_test())
 }

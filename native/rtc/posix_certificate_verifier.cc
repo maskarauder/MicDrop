@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "posix_certificate_verifier.h"
 
+#include <ctime>
 #include <new>
+
+#if !defined(__APPLE__)
 #include <sys/stat.h>
+#endif
 
 #include <openssl/err.h>
 #include <openssl/stack.h>
@@ -33,6 +37,147 @@ struct X509Deleter {
 };
 using ScopedX509 = std::unique_ptr<X509, X509Deleter>;
 
+ScopedX509 ParseDER(const uint8_t* data, size_t size) {
+  if (!data || size == 0 || size > 1024 * 1024) return nullptr;
+  const uint8_t* ptr = data;
+  return ScopedX509(d2i_X509(nullptr, &ptr, static_cast<long>(size)));
+}
+
+#if defined(__APPLE__)
+template <typename T>
+struct CFGuard {
+  T ref = nullptr;
+  explicit CFGuard(T value = nullptr) : ref(value) {}
+  ~CFGuard() {
+    if (ref) CFRelease(ref);
+  }
+  CFGuard(const CFGuard&) = delete;
+  CFGuard& operator=(const CFGuard&) = delete;
+};
+
+uint32_t VerifyServerChainMacOS(
+    const webrtc::SSLCertChain& certificates,
+    const std::optional<PosixCertificateVerifier::RootList>& exclusive_roots,
+    const std::optional<int64_t>& verify_unix_seconds) {
+  ErrCleaner cleaner;
+  if (certificates.GetSize() == 0 || certificates.GetSize() > 16) {
+    return kErrorInvalidData;
+  }
+
+  CFGuard<CFMutableArrayRef> cert_chain(
+      CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks));
+  if (!cert_chain.ref) return kErrorOutOfMemory;
+
+  size_t total_bytes = 0;
+  for (size_t i = 0; i < certificates.GetSize(); ++i) {
+    webrtc::Buffer der;
+    certificates.Get(i).ToDER(&der);
+    if (der.size() == 0 || der.size() > 1024 * 1024 - total_bytes) {
+      return kErrorInvalidData;
+    }
+    total_bytes += der.size();
+
+    ScopedX509 parsed = ParseDER(der.data(), der.size());
+    if (!parsed) return kErrorInvalidData;
+    if (i == 0 && (X509_get_extended_key_usage(parsed.get()) & XKU_SSL_SERVER) == 0) {
+      return static_cast<uint32_t>(X509_V_ERR_INVALID_PURPOSE);
+    }
+
+    CFGuard<CFDataRef> cf_der(
+        CFDataCreate(kCFAllocatorDefault, der.data(), static_cast<CFIndex>(der.size())));
+    if (!cf_der.ref) return kErrorOutOfMemory;
+    CFGuard<SecCertificateRef> sec_cert(
+        SecCertificateCreateWithData(kCFAllocatorDefault, cf_der.ref));
+    if (!sec_cert.ref) return kErrorInvalidData;
+    // Index 0 is the peer leaf; subsequent certificates are untrusted chain-building
+    // hints and are never added to SecTrust anchor certificates.
+    CFArrayAppendValue(cert_chain.ref, sec_cert.ref);
+  }
+
+  // This callback receives no hostname. WebRTC's SSLPostConnectionCheck verifies
+  // the original TURN URL hostname separately after chain validation succeeds.
+  CFGuard<SecPolicyRef> policy(SecPolicyCreateSSL(/*server=*/true, /*hostname=*/nullptr));
+  if (!policy.ref) return kErrorOutOfMemory;
+
+  SecTrustRef raw_trust = nullptr;
+  const OSStatus create_status =
+      SecTrustCreateWithCertificates(cert_chain.ref, policy.ref, &raw_trust);
+  CFGuard<SecTrustRef> trust(raw_trust);
+  if (create_status != errSecSuccess || !trust.ref) {
+    return create_status != errSecSuccess
+               ? static_cast<uint32_t>(static_cast<int32_t>(create_status))
+               : kErrorInvalidData;
+  }
+
+  // In production (exclusive_roots == std::nullopt), leave SecTrust's default
+  // anchor configuration intact so macOS evaluates system roots alongside user
+  // and admin Keychain trust settings (including per-leaf or per-intermediate
+  // "Never Trust" overrides).
+  if (exclusive_roots.has_value()) {
+    CFGuard<CFMutableArrayRef> anchors(
+        CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks));
+    if (!anchors.ref) return kErrorOutOfMemory;
+    for (const auto& root_der : *exclusive_roots) {
+      if (root_der.empty() || root_der.size() > 1024 * 1024) return kErrorInvalidData;
+      CFGuard<CFDataRef> cf_root(
+          CFDataCreate(kCFAllocatorDefault, root_der.data(), static_cast<CFIndex>(root_der.size())));
+      if (!cf_root.ref) return kErrorOutOfMemory;
+      CFGuard<SecCertificateRef> sec_root(
+          SecCertificateCreateWithData(kCFAllocatorDefault, cf_root.ref));
+      if (!sec_root.ref) return kErrorInvalidData;
+      CFArrayAppendValue(anchors.ref, sec_root.ref);
+    }
+    if (SecTrustSetAnchorCertificates(trust.ref, anchors.ref) != errSecSuccess ||
+        SecTrustSetAnchorCertificatesOnly(trust.ref, true) != errSecSuccess ||
+        SecTrustSetNetworkFetchAllowed(trust.ref, false) != errSecSuccess) {
+      return kErrorTrustStoreUnavailable;
+    }
+  }
+
+  if (verify_unix_seconds.has_value()) {
+    const CFAbsoluteTime cf_time =
+        static_cast<CFAbsoluteTime>(*verify_unix_seconds) - kCFAbsoluteTimeIntervalSince1970;
+    CFGuard<CFDateRef> verify_date(CFDateCreate(kCFAllocatorDefault, cf_time));
+    if (!verify_date.ref ||
+        SecTrustSetVerifyDate(trust.ref, verify_date.ref) != errSecSuccess) {
+      return kErrorInvalidData;
+    }
+  }
+
+  CFErrorRef raw_error = nullptr;
+  const bool trusted = SecTrustEvaluateWithError(trust.ref, &raw_error);
+  CFGuard<CFErrorRef> eval_error(raw_error);
+  if (!trusted) {
+    const CFIndex code = eval_error.ref ? CFErrorGetCode(eval_error.ref) : 0;
+    return code != 0 ? static_cast<uint32_t>(static_cast<int32_t>(code)) : kErrorInvalidData;
+  }
+
+  CFGuard<CFArrayRef> evaluated_chain(SecTrustCopyCertificateChain(trust.ref));
+  if (!evaluated_chain.ref || CFArrayGetCount(evaluated_chain.ref) == 0) {
+    return kErrorInvalidData;
+  }
+  const CFIndex chain_count = CFArrayGetCount(evaluated_chain.ref);
+  for (CFIndex i = 0; i < chain_count; ++i) {
+    const void* item = CFArrayGetValueAtIndex(evaluated_chain.ref, i);
+    if (!item) return kErrorInvalidData;
+    auto cert_ref = reinterpret_cast<SecCertificateRef>(const_cast<void*>(item));
+    CFGuard<CFDataRef> cert_der(SecCertificateCopyData(cert_ref));
+    if (!cert_der.ref) return kErrorInvalidData;
+    const UInt8* bytes = CFDataGetBytePtr(cert_der.ref);
+    const CFIndex len = CFDataGetLength(cert_der.ref);
+    ScopedX509 x509_cert =
+        (bytes && len > 0) ? ParseDER(bytes, static_cast<size_t>(len)) : nullptr;
+    if (!x509_cert) return kErrorInvalidData;
+    const uint32_t eku = X509_get_extended_key_usage(x509_cert.get());
+    const uint32_t allowed = (i == 0) ? XKU_SSL_SERVER : (XKU_SSL_SERVER | XKU_ANYEKU);
+    if ((eku & allowed) == 0) {
+      return static_cast<uint32_t>(X509_V_ERR_INVALID_PURPOSE);
+    }
+  }
+
+  return 0;
+}
+#else
 struct X509StackDeleter {
   void operator()(STACK_OF(X509)* stack) const {
     if (stack) sk_X509_pop_free(stack, X509_free);
@@ -54,47 +199,6 @@ struct StoreCtxDeleter {
 };
 using ScopedStoreCtx = std::unique_ptr<X509_STORE_CTX, StoreCtxDeleter>;
 
-ScopedX509 ParseDER(const uint8_t* data, size_t size) {
-  if (!data || size == 0 || size > 1024 * 1024) return nullptr;
-  const uint8_t* ptr = data;
-  return ScopedX509(d2i_X509(nullptr, &ptr, static_cast<long>(size)));
-}
-
-#if defined(__APPLE__)
-bool LoadSystemRootsMacOS(X509_STORE* store) {
-  CFArrayRef anchors = nullptr;
-  if (SecTrustCopyAnchorCertificates(&anchors) != errSecSuccess || !anchors) {
-    return false;
-  }
-  struct ArrayGuard {
-    CFArrayRef ref;
-    ~ArrayGuard() {
-      if (ref) CFRelease(ref);
-    }
-  } guard{anchors};
-
-  const CFIndex count = CFArrayGetCount(anchors);
-  size_t loaded = 0;
-  for (CFIndex i = 0; i < count; ++i) {
-    const void* item = CFArrayGetValueAtIndex(anchors, i);
-    if (!item) continue;
-    auto cert_ref = reinterpret_cast<SecCertificateRef>(const_cast<void*>(item));
-    CFDataRef der_data = SecCertificateCopyData(cert_ref);
-    if (!der_data) continue;
-    const UInt8* bytes = CFDataGetBytePtr(der_data);
-    const CFIndex length = CFDataGetLength(der_data);
-    ScopedX509 parsed = (bytes && length > 0)
-                            ? ParseDER(bytes, static_cast<size_t>(length))
-                            : nullptr;
-    CFRelease(der_data);
-    if (parsed && X509_STORE_add_cert(store, parsed.get()) == 1) {
-      ++loaded;
-    }
-    ERR_clear_error();
-  }
-  return loaded > 0;
-}
-#else
 bool FileExists(const char* path) {
   struct stat st{};
   return path && ::stat(path, &st) == 0 && S_ISREG(st.st_mode);
@@ -134,9 +238,10 @@ bool LoadSystemRootsLinux(X509_STORE* store) {
   }
   return loaded;
 }
-#endif
 
-uint32_t VerifyServerChain(const webrtc::SSLCertChain& certificates, X509_STORE* store) {
+uint32_t VerifyServerChainLinux(const webrtc::SSLCertChain& certificates,
+                                X509_STORE* store,
+                                const std::optional<int64_t>& verify_unix_seconds) {
   ErrCleaner cleaner;
   if (!store) return kErrorTrustStoreUnavailable;
   if (certificates.GetSize() == 0 || certificates.GetSize() > 16) return kErrorInvalidData;
@@ -182,6 +287,9 @@ uint32_t VerifyServerChain(const webrtc::SSLCertChain& certificates, X509_STORE*
       X509_VERIFY_PARAM_set_trust(param, X509_TRUST_SSL_SERVER) != 1) {
     return kErrorInvalidData;
   }
+  if (verify_unix_seconds.has_value()) {
+    X509_VERIFY_PARAM_set_time(param, static_cast<time_t>(*verify_unix_seconds));
+  }
 
   if (X509_verify_cert(ctx.get()) == 1) {
     return 0;
@@ -189,21 +297,28 @@ uint32_t VerifyServerChain(const webrtc::SSLCertChain& certificates, X509_STORE*
   const int verify_error = X509_STORE_CTX_get_error(ctx.get());
   return verify_error > 0 ? static_cast<uint32_t>(verify_error) : kErrorInvalidData;
 }
+#endif
 
 }  // namespace
 
 PosixCertificateVerifier::PosixCertificateVerifier(
     std::shared_ptr<TLSVerificationDiagnostics> diagnostics,
-    std::optional<RootList> exclusive_roots)
-    : diagnostics_(std::move(diagnostics)), exclusive_roots_(std::move(exclusive_roots)) {}
+    std::optional<RootList> exclusive_roots,
+    std::optional<int64_t> verify_unix_seconds)
+    : diagnostics_(std::move(diagnostics)),
+      exclusive_roots_(std::move(exclusive_roots)),
+      verify_unix_seconds_(verify_unix_seconds) {}
 
 PosixCertificateVerifier::~PosixCertificateVerifier() {
+#if !defined(__APPLE__)
   if (store_) {
     X509_STORE_free(store_);
     store_ = nullptr;
   }
+#endif
 }
 
+#if !defined(__APPLE__)
 X509_STORE* PosixCertificateVerifier::EnsureTrustStore() {
   std::lock_guard lock(store_mutex_);
   if (store_initialized_) return store_;
@@ -224,19 +339,20 @@ X509_STORE* PosixCertificateVerifier::EnsureTrustStore() {
     return store_;
   }
 
-#if defined(__APPLE__)
-  if (!LoadSystemRootsMacOS(store.get())) return nullptr;
-#else
   if (!LoadSystemRootsLinux(store.get())) return nullptr;
-#endif
   store_ = store.release();
   return store_;
 }
+#endif
 
 bool PosixCertificateVerifier::VerifyChain(const webrtc::SSLCertChain& chain) {
   uint32_t error = kErrorInvalidData;
   try {
-    error = VerifyServerChain(chain, EnsureTrustStore());
+#if defined(__APPLE__)
+    error = VerifyServerChainMacOS(chain, exclusive_roots_, verify_unix_seconds_);
+#else
+    error = VerifyServerChainLinux(chain, EnsureTrustStore(), verify_unix_seconds_);
+#endif
   } catch (const std::bad_alloc&) {
     error = kErrorOutOfMemory;
   } catch (...) {

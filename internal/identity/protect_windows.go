@@ -4,6 +4,7 @@ package identity
 
 import (
 	"errors"
+	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
@@ -22,7 +23,10 @@ type dataBlob struct {
 }
 type dpapi struct{}
 
-func protectionLabel() string                     { return "windows_dpapi_current_user" }
+func protectionLabel() string { return "windows_dpapi_current_user" }
+func userDataRoot() (string, error) {
+	return os.UserCacheDir() // %LOCALAPPDATA% on Windows, not the executable directory.
+}
 func platformProtector() (protector, error)       { return dpapi{}, nil }
 func (dpapi) protect(data []byte) ([]byte, error) { return transform(protectData, data, maxPlainBytes) }
 func (dpapi) unprotect(data []byte) ([]byte, error) {

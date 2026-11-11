@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -189,5 +190,101 @@ func TestUnixProtectedGrantsLockReplacementAndPurpose(t *testing.T) {
 	defer reopened.Close()
 	if _, err := reopened.Load(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUnixDefaultDirectoryPersistsAcrossCacheCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Application Support"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Caches"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	previous := testKeystoreDir
+	testKeystoreDir = ""
+	t.Cleanup(func() { testKeystoreDir = previous })
+
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaultDir, err := DefaultDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(defaultDir, filepath.Clean(cacheRoot)+string(filepath.Separator)) || defaultDir == filepath.Clean(cacheRoot) {
+		t.Fatalf("DefaultDirectory() resolved inside cache dir: %q (cache=%q)", defaultDir, cacheRoot)
+	}
+	if want := filepath.Join(configRoot, "MicDrop", "identity"); defaultDir != want {
+		t.Fatalf("DefaultDirectory() = %q, want %q", defaultDir, want)
+	}
+
+	store, err := NewStore(defaultDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, created, err := store.Ensure()
+	if err != nil || !created {
+		t.Fatalf("Ensure first: created=%v err=%v", created, err)
+	}
+	grants, err := store.OpenPairing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGrants := []byte(`{"devices":["phone-1"]}`)
+	if err := grants.Save(wantGrants); err != nil {
+		grants.Close()
+		t.Fatal(err)
+	}
+	if err := grants.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantRemote := []byte(`{"version":1,"url":"https://turn.example.invalid"}`)
+	if err := store.SaveRemote(wantRemote); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate OS or user cache cleanup removing MicDrop's cache directory (and the entire cache root).
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "MicDrop"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cacheRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	reopenedDir, err := DefaultDirectory()
+	if err != nil || reopenedDir != defaultDir {
+		t.Fatalf("DefaultDirectory after cache cleanup = %q, %v", reopenedDir, err)
+	}
+	reopened, err := NewStore(reopenedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, created, err := reopened.Ensure()
+	if err != nil || created || second.Info() != first.Info() {
+		t.Fatalf("cache cleanup lost host identity: created=%v err=%v first=%v second=%v", created, err, first.Info(), second.Info())
+	}
+	reopenedGrants, err := reopened.OpenPairing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopenedGrants.Close()
+	gotGrants, err := reopenedGrants.Load()
+	if err != nil || !bytes.Equal(gotGrants, wantGrants) {
+		t.Fatalf("cache cleanup lost pairing grants: %v", err)
+	}
+	gotRemote, err := reopened.LoadRemote()
+	if err != nil || !bytes.Equal(gotRemote, wantRemote) {
+		t.Fatalf("cache cleanup lost remote settings: %v", err)
 	}
 }

@@ -339,6 +339,7 @@ static char* mdDupUTF8(NSString* s) {
 @interface MicDropAppController : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic, assign) BOOL headlessTest;
 @property(nonatomic, assign) BOOL requestedNotifAuth;
+@property(nonatomic, assign) BOOL pendingSystemTerminate;
 @property(nonatomic, assign) int exitControlID;
 @property(nonatomic, assign) int startControlID;
 @property(nonatomic, assign) int stopControlID;
@@ -355,9 +356,27 @@ static char* mdDupUTF8(NSString* s) {
 - (void)handleOpenWindow:(id)sender;
 - (void)handleToggleHost:(id)sender;
 - (void)handleQuit:(id)sender;
+- (void)completeSystemTerminate;
 @end
 
 static MicDropAppController* gApp = nil;
+static int gTestTerminateApprovedCount = 0;
+
+static void mdPostStopLoop(void) {
+  [NSApp stop:nil];
+  NSEvent* wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                     location:NSMakePoint(0, 0)
+                                modifierFlags:0
+                                    timestamp:0
+                                 windowNumber:0
+                                      context:nil
+                                      subtype:0
+                                        data1:0
+                                        data2:0];
+  if (wake != nil) {
+    [NSApp postEvent:wake atStart:YES];
+  }
+}
 
 @implementation MicDropAppController
 - (instancetype)init {
@@ -407,10 +426,28 @@ static MicDropAppController* gApp = nil;
   goMicDropEvent(self.exitControlID, MD_EVENT_CLICK);
 }
 
+- (void)completeSystemTerminate {
+  if (!self.pendingSystemTerminate) {
+    return;
+  }
+  self.pendingSystemTerminate = NO;
+  if (self.headlessTest) {
+    gTestTerminateApprovedCount += 1;
+    mdPostStopLoop();
+    return;
+  }
+  md_app_cleanup();
+  [NSApp replyToApplicationShouldTerminate:YES];
+}
+
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
   (void)sender;
+  self.pendingSystemTerminate = YES;
+  if ([NSApp modalWindow] != nil) {
+    [NSApp abortModal];
+  }
   goMicDropEvent(self.exitControlID, MD_EVENT_CLICK);
-  return NSTerminateCancel;
+  return NSTerminateLater;
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)sender hasVisibleWindows:(BOOL)flag {
@@ -554,6 +591,7 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
       [app setActivationPolicy:NSApplicationActivationPolicyRegular];
     }
 
+    gTestTerminateApprovedCount = 0;
     MicDropAppController* controller = [[MicDropAppController alloc] init];
     controller.headlessTest = headless_test != 0;
     controller.startControlID = start_id;
@@ -610,6 +648,7 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
                                            userInfo:nil
                                             repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSModalPanelRunLoopMode];
     controller.timer = timer;
     return 1;
   }
@@ -647,19 +686,17 @@ void md_app_run(void) {
 
 void md_app_stop_loop(void) {
   @autoreleasepool {
-    [NSApp stop:nil];
-    NSEvent* wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
-                                       location:NSMakePoint(0, 0)
-                                  modifierFlags:0
-                                      timestamp:0
-                                   windowNumber:0
-                                        context:nil
-                                        subtype:0
-                                          data1:0
-                                          data2:0];
-    if (wake != nil) {
-      [NSApp postEvent:wake atStart:YES];
+    if (gApp != nil && gApp.pendingSystemTerminate) {
+      [NSObject cancelPreviousPerformRequestsWithTarget:gApp
+                                               selector:@selector(completeSystemTerminate)
+                                                 object:nil];
+      [gApp performSelector:@selector(completeSystemTerminate)
+                 withObject:nil
+                 afterDelay:0.0
+                    inModes:@[ NSRunLoopCommonModes, NSModalPanelRunLoopMode ]];
+      return;
     }
+    mdPostStopLoop();
   }
 }
 
@@ -668,6 +705,7 @@ void md_app_cleanup(void) {
     if (gApp == nil) {
       return;
     }
+    [NSObject cancelPreviousPerformRequestsWithTarget:gApp];
     if (gApp.timer != nil) {
       [gApp.timer invalidate];
       gApp.timer = nil;
@@ -692,21 +730,33 @@ void md_app_cleanup(void) {
 }
 
 void md_app_dispatch_wake(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{
+  CFRunLoopRef mainLoop = CFRunLoopGetMain();
+  if (mainLoop == NULL) {
+    return;
+  }
+  NSArray<NSRunLoopMode>* modes = @[ NSRunLoopCommonModes, NSModalPanelRunLoopMode ];
+  CFRunLoopPerformBlock(mainLoop, (__bridge CFTypeRef)modes, ^{
     @autoreleasepool {
       if (gApp != nil) {
         goMicDropTick();
       }
     }
   });
+  CFRunLoopWakeUp(mainLoop);
 }
 
 void md_app_wake_test(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{
+  CFRunLoopRef mainLoop = CFRunLoopGetMain();
+  if (mainLoop == NULL) {
+    return;
+  }
+  NSArray<NSRunLoopMode>* modes = @[ NSRunLoopCommonModes, NSModalPanelRunLoopMode ];
+  CFRunLoopPerformBlock(mainLoop, (__bridge CFTypeRef)modes, ^{
     @autoreleasepool {
       goMicDropDrainTestQueue();
     }
   });
+  CFRunLoopWakeUp(mainLoop);
 }
 
 static MicDropControlEntry* mdEntry(int controlID) {
@@ -1439,6 +1489,19 @@ void md_ui_trigger(int controlID, int event_kind) {
     }
     goMicDropEvent(controlID, event_kind);
   }
+}
+
+int md_ui_request_terminate_for_test(void) {
+  @autoreleasepool {
+    if (gApp == nil) {
+      return -1;
+    }
+    return (int)[gApp applicationShouldTerminate:NSApp];
+  }
+}
+
+int md_ui_terminate_approved_count_for_test(void) {
+  return gTestTerminateApprovedCount;
 }
 
 #endif

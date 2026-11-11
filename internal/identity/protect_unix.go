@@ -37,6 +37,10 @@ type unixProtector struct {
 
 func protectionLabel() string { return "unix_user_keystore_aead_v1" }
 
+func userDataRoot() (string, error) {
+	return os.UserConfigDir() // ~/Library/Application Support on macOS; $XDG_CONFIG_HOME (~/.config) on Linux.
+}
+
 func platformProtector() (protector, error) {
 	if _, err := keystoreDirectory(); err != nil {
 		return nil, ErrUnavailable

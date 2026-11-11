@@ -73,5 +73,7 @@ int md_ui_open_firewall_settings(void);
 int md_ui_check_bounds(int id, int* out_x, int* out_y, int* out_w, int* out_h, int* win_w, int* win_h);
 int md_ui_capture_png(const char* out_path);
 void md_ui_trigger(int id, int event_kind);
+int md_ui_request_terminate_for_test(void);
+int md_ui_terminate_approved_count_for_test(void);
 
 #endif
