@@ -761,7 +761,7 @@ int run_capture_stream(
     std::unique_ptr<mdw_recording> recording;
     size_t recording_capacity = 0;
     if (timed && store_pcm) {
-      const uint64_t expected_frames = (static_cast<uint64_t>(sample_rate) * (duration_ms + 500)) / 1000;
+      const uint64_t expected_frames = (static_cast<uint64_t>(sample_rate) * (duration_ms + 2500)) / 1000;
       const uint64_t expected_bytes = expected_frames * channels * sizeof(int16_t);
       recording_capacity = static_cast<size_t>(std::min<uint64_t>(
           kMaxRecordingBytes, std::max<uint64_t>(expected_bytes, 65536u)));

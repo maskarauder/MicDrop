@@ -332,12 +332,14 @@ jobs:
           fi
 
           # Simultaneously inject synthetic stereo tone into MicDropCable and capture from its monitor.
-          timeout 15s ./build/host/micdrop-host bridge-check \
+          # PulseAudio module-null-sink sleeps in 2s BLOCK_USEC intervals while idle, so allow 2.2s
+          # for the sink thread to wake into low-latency streaming before starting the 2.5s capture.
+          timeout 20s ./build/host/micdrop-host bridge-check \
             --render-device MicDropCable \
-            --duration 3500ms \
+            --duration 6000ms \
             > build/linux-audio-check/bridge-cable.json &
           BRIDGE_PID=$!
-          sleep 0.2
+          sleep 2.2
           timeout 15s ./build/host/micdrop-host capture \
             --device MicDropCable \
             --duration 2500ms \
@@ -346,12 +348,12 @@ jobs:
           wait "$BRIDGE_PID"
 
           # Verify default output sink resolution (no --device flag) with live audio.
-          timeout 15s ./build/host/micdrop-host bridge-check \
+          timeout 20s ./build/host/micdrop-host bridge-check \
             --render-device MicDropDesktop \
-            --duration 3500ms \
+            --duration 6000ms \
             > build/linux-audio-check/bridge-default.json &
           DEF_BRIDGE_PID=$!
-          sleep 0.2
+          sleep 2.2
           timeout 15s ./build/host/micdrop-host capture \
             --duration 2500ms \
             > build/linux-audio-check/capture-default.json
@@ -376,7 +378,7 @@ jobs:
 
           bridge_report = json.loads((base / "bridge-cable.json").read_text(encoding="utf-8"))
           assert bridge_report["render_device"]["id"] == "MicDropCable", bridge_report
-          assert bridge_report["submitted_frames"] == 168000, bridge_report
+          assert bridge_report["submitted_frames"] == 288000, bridge_report
 
           cap_cable = json.loads((base / "capture-cable.json").read_text(encoding="utf-8"))
           assert cap_cable["device"]["id"] == "MicDropCable", cap_cable
