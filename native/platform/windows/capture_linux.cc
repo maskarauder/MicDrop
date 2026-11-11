@@ -900,22 +900,22 @@ int run_capture_stream(
       }
 
       if (timed && std::chrono::steady_clock::now() >= stop_at) break;
-      const int timeout_ms = timed
-          ? static_cast<int>(std::clamp<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    stop_at - std::chrono::steady_clock::now())
-                    .count(),
-                1, 20))
-          : 50;
-      require_state(api.mainloop_iterate(session.loop, 0, nullptr) >= 0, "Service loopback events");
-      // Poll briefly using mainloop_iterate when non-timed, or bounded sleep/iterate when timed.
+
+      int dispatched = 0;
+      for (int spin = 0; spin < 64; ++spin) {
+        const int r = api.mainloop_iterate(session.loop, 0, nullptr);
+        require_state(r >= 0, "Service loopback events");
+        if (r == 0) break;
+        dispatched += r;
+      }
+      if (dispatched > 0) continue;
+
       if (!timed) {
         if (api.mainloop_iterate(session.loop, 1, nullptr) < 0) {
           fail_throw(kErrFail, "Wait for desktop loopback audio");
         }
       } else {
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(timeout_ms, 5)));
-        require_state(api.mainloop_iterate(session.loop, 0, nullptr) >= 0, "Drain loopback events");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
 
