@@ -44,34 +44,81 @@ Download matching desktop and phone packages from the latest release on the
 
 ### Setup in 4 Steps
 
-1. **Install on Windows:** Run the setup installer (or extract the portable ZIP)
-   and launch **MicDrop** from the Start menu or system tray
-   ([desktop guide](docs/WINDOWS_DESKTOP.md)).
+1. **Install or launch on your computer:**
+   - **Windows 11:** Run the setup installer (or extract the portable ZIP) and
+     launch **MicDrop** from the Start menu or system tray
+     ([Windows guide](docs/WINDOWS_DESKTOP.md)).
+   - **macOS 14.2+ (Apple Silicon):** Open **MicDrop.app** (or run
+     `./micdrop-host` from the CLI; [macOS guide](docs/MACOS_DESKTOP.md)).
+   - **Linux (x64):** Run `./micdrop-host desktop` (or `--install-launcher` to
+     add an application menu entry; [Linux guide](docs/LINUX_DESKTOP.md)).
 2. **Install on your phone:** Install the matching Android `.apk` or sideload
    the iPhone `.ipa` from the same release version.
-3. **Pair your phone:** Click **Pair phone** in the Windows app, scan the QR
-   code (or paste the link) on your phone, and click **Approve** on Windows.
+3. **Pair your phone:** Open the **Phones** tab and click **Pair a phone** in
+   the desktop app, scan the QR code (or paste the link) on your phone, verify
+   the request ID, and click **Approve** on your computer.
 4. **Connect:** Tap **Connect** on your phone to start listening to desktop
    audio.
-   - **Using your phone as a PC microphone?** Install a separate Windows
-     [virtual audio cable](docs/VIRTUAL_AUDIO_CABLE.md), select its input in
-     MicDrop on Windows, and enable the microphone mode on your phone.
+   - **Using your phone as a desktop microphone?** Set up a separate
+     [virtual audio cable or sink](docs/VIRTUAL_AUDIO_CABLE.md), select it in
+     MicDrop on your computer, and enable microphone mode on your phone.
    - **Connecting outside your home Wi-Fi?** See the optional
      [remote access guide](docs/REMOTE_ACCESS.md).
 
+## Desktop UI Preview
+
+Native dark slate & gold desktop UIs sharing the same host engine across
+Windows (`MicDrop.exe`), Linux GTK3 (`micdrop-host desktop`), and Apple Silicon
+macOS AppKit (`MicDrop.app`):
+
+| Linux GTK3 (`micdrop-host desktop`) | macOS AppKit (`MicDrop.app`) |
+| --- | --- |
+| ![MicDrop Linux Audio tab](docs/images/linux-desktop/audio.png) | ![MicDrop macOS Audio tab](docs/images/macos-desktop/audio.png) |
+
+<details>
+<summary><strong>More Linux desktop screenshots (Connection, Phones &amp; QR, Options, Phone Settings)</strong></summary>
+
+| Connection | Phones & QR Pairing |
+| --- | --- |
+| ![MicDrop Linux Connection tab](docs/images/linux-desktop/connection.png) | ![MicDrop Linux Phones tab](docs/images/linux-desktop/phones.png) |
+
+| Options | Connected Phone Settings Editor |
+| --- | --- |
+| ![MicDrop Linux Options tab](docs/images/linux-desktop/options.png) | ![MicDrop Linux Phone Settings editor](docs/images/linux-desktop/device-settings.png) |
+
+</details>
+
+<details>
+<summary><strong>More macOS desktop screenshots (Connection, Phones &amp; QR, Options, Phone Settings)</strong></summary>
+
+| Connection | Phones & QR Pairing |
+| --- | --- |
+| ![MicDrop macOS Connection tab](docs/images/macos-desktop/connection.png) | ![MicDrop macOS Phones tab](docs/images/macos-desktop/phones.png) |
+
+| Options | Connected Phone Settings Editor |
+| --- | --- |
+| ![MicDrop macOS Options tab](docs/images/macos-desktop/options.png) | ![MicDrop macOS Phone Settings editor](docs/images/macos-desktop/device-settings.png) |
+
+</details>
+
 ## Things to Know
 
-- **Unsigned beta builds:** Windows packages are not code-signed yet, so
-  Windows SmartScreen may prompt on first run (*More info → Run anyway*). The
-  Android APK is sideloaded rather than from Google Play, and the iPhone IPA is
-  unsigned—signing with a free Apple ID requires refreshing every 7 days.
+- **Unsigned / ad-hoc beta builds:** Windows packages are not Authenticode-signed
+  yet, so Windows SmartScreen may prompt on first run (*More info → Run anyway*).
+  `MicDrop.app` on macOS uses ad-hoc code signing rather than Developer ID
+  notarization, so macOS Gatekeeper may require *System Settings → Privacy &
+  Security → Open Anyway* on downloaded archives. The Android APK is sideloaded
+  rather than from Google Play, and the iPhone IPA is unsigned—signing with a
+  free Apple ID requires refreshing every 7 days.
 - **Bluetooth audio behavior:** Bluetooth headphones add device buffering delay,
   and using a classic Bluetooth headset's microphone can switch headphone
   playback to voice call quality depending on the headset and OS.
 - **Virtual cable not bundled:** Microphone return requires a separately
-  installed Windows virtual audio cable; MicDrop does not install kernel audio
-  drivers.
-- **One active stream at a time:** The Windows host runs while you are signed in
+  configured virtual audio cable or sink (such as VB-CABLE on Windows, a
+  user-space HAL plugin like BlackHole 2ch on macOS, or a PipeWire/PulseAudio
+  `module-null-sink` + `module-remap-source` pair on Linux); MicDrop does not
+  install kernel audio drivers.
+- **One active stream at a time:** The desktop host runs while you are signed in
   and awake, and accepts one active phone audio session at a time.
 - **Latency stats vs. physical delay:** In-app RTT and buffer counters show
   network/pipeline health, not acoustic speaker-to-ear latency
@@ -92,9 +139,10 @@ chip in on Ko-fi:
 ## Report Issues & Contribute
 
 - **Bug reports:** Open an [Issue](https://github.com/maskarauder/MicDrop/issues)
-  with your app version, Windows/phone OS version, audio route (speaker, wired,
-  or Bluetooth model), and steps to reproduce. Review diagnostic reports before
-  sharing and never post pairing links, relay credentials, or private audio.
+  with your app version, desktop and phone OS versions, audio route (speaker,
+  wired, or Bluetooth model), and steps to reproduce. Review diagnostic reports
+  before sharing and never post pairing links, relay credentials, or private
+  audio.
 - **Security vulnerabilities:** Please report privately via
   [SECURITY.md](SECURITY.md) rather than a public issue
   (see also the [security and privacy guide](docs/SECURITY.md)).
