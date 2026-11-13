@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
@@ -139,11 +140,25 @@ func textAt(hwnd uintptr) string {
 	return windows.UTF16ToString(b[:])
 }
 func setText(hwnd uintptr, text string) {
-	setWindowText.Call(hwnd, uintptr(unsafe.Pointer(wide(text))))
+	p := wide(text)
+	setWindowText.Call(hwnd, uintptr(unsafe.Pointer(p)))
+	runtime.KeepAlive(p)
 }
+
+// send dispatches a Win32 message with integer-only wParam and lParam values.
+// Never pass Go pointers via send; use sendPointer or sendText so the Go
+// garbage collector retains the pointed-to allocation until SendMessageW returns.
 func send(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
 	r, _, _ := sendMessage.Call(hwnd, uintptr(message), wparam, lparam)
 	return r
+}
+func sendPointer[T any](hwnd uintptr, message uint32, wparam uintptr, lparam *T) uintptr {
+	r, _, _ := sendMessage.Call(hwnd, uintptr(message), wparam, uintptr(unsafe.Pointer(lparam)))
+	runtime.KeepAlive(lparam)
+	return r
+}
+func sendText(hwnd uintptr, message uint32, wparam uintptr, text string) uintptr {
+	return sendPointer(hwnd, message, wparam, wide(text))
 }
 func enabled(hwnd uintptr, yes bool) {
 	v := uintptr(0)
@@ -175,15 +190,24 @@ func check(hwnd uintptr, yes bool) {
 }
 func showError(hwnd uintptr, err error) {
 	if err != nil {
-		messageBox.Call(hwnd, uintptr(unsafe.Pointer(wide(err.Error()))), uintptr(unsafe.Pointer(wide("MicDrop"))), 0x10)
+		msg, title := wide(err.Error()), wide("MicDrop")
+		messageBox.Call(hwnd, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10)
+		runtime.KeepAlive(msg)
+		runtime.KeepAlive(title)
 	}
 }
 func confirm(hwnd uintptr, text string) bool {
-	r, _, _ := messageBox.Call(hwnd, uintptr(unsafe.Pointer(wide(text))), uintptr(unsafe.Pointer(wide("MicDrop"))), 0x24|0x100)
+	msg, title := wide(text), wide("MicDrop")
+	r, _, _ := messageBox.Call(hwnd, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x24|0x100)
+	runtime.KeepAlive(msg)
+	runtime.KeepAlive(title)
 	return r == 6
 }
 func shellOpen(hwnd uintptr, path string) error {
-	r, _, _ := shellExecute.Call(hwnd, uintptr(unsafe.Pointer(wide("open"))), uintptr(unsafe.Pointer(wide(path))), 0, 0, 1)
+	verb, target := wide("open"), wide(path)
+	r, _, _ := shellExecute.Call(hwnd, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(target)), 0, 0, 1)
+	runtime.KeepAlive(verb)
+	runtime.KeepAlive(target)
 	if r <= 32 {
 		return errors.New("Windows could not open this item")
 	}
@@ -195,7 +219,11 @@ func openFirewall(hwnd uintptr) error {
 		return err
 	}
 	path := filepath.Join(directory, "control.exe")
-	result, _, _ := shellExecute.Call(hwnd, uintptr(unsafe.Pointer(wide("open"))), uintptr(unsafe.Pointer(wide(path))), uintptr(unsafe.Pointer(wide("firewall.cpl"))), 0, 1)
+	verb, target, args := wide("open"), wide(path), wide("firewall.cpl")
+	result, _, _ := shellExecute.Call(hwnd, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(target)), uintptr(unsafe.Pointer(args)), 0, 1)
+	runtime.KeepAlive(verb)
+	runtime.KeepAlive(target)
+	runtime.KeepAlive(args)
 	if result <= 32 {
 		return errors.New("Windows Firewall settings could not be opened")
 	}
@@ -205,9 +233,13 @@ func openFirewall(hwnd uintptr) error {
 func chooseConfig(hwnd uintptr) (string, error) {
 	var path [32768]uint16
 	filter := utf16.Encode([]rune("Remote configuration (*.json)\x00*.json\x00All files\x00*.*\x00\x00"))
-	options := openFileName{Owner: hwnd, Filter: &filter[0], File: &path[0], MaxFile: uint32(len(path)), Title: wide("Import private MicDrop remote configuration"), Flags: 0x1000 | 0x800 | 0x80000 | 8 | 0x2000000}
+	title := wide("Import private MicDrop remote configuration")
+	options := openFileName{Owner: hwnd, Filter: &filter[0], File: &path[0], MaxFile: uint32(len(path)), Title: title, Flags: 0x1000 | 0x800 | 0x80000 | 8 | 0x2000000}
 	options.Size = uint32(unsafe.Sizeof(options))
 	ok, _, _ := comdlg32.NewProc("GetOpenFileNameW").Call(uintptr(unsafe.Pointer(&options)))
+	runtime.KeepAlive(&options)
+	runtime.KeepAlive(filter)
+	runtime.KeepAlive(title)
 	if ok == 0 {
 		code, _, _ := comdlg32.NewProc("CommDlgExtendedError").Call()
 		if code != 0 {
@@ -237,6 +269,7 @@ func copyText(hwnd uintptr, text string) error {
 		return errors.New("cannot lock clipboard memory")
 	}
 	moveMemory.Call(ptr, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)*2))
+	runtime.KeepAlive(data)
 	kernel32.NewProc("GlobalUnlock").Call(memory)
 	ok, _, _ := user32.NewProc("OpenClipboard").Call(hwnd)
 	if ok == 0 {

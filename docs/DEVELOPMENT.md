@@ -1,24 +1,28 @@
 # Development and build instructions
 
-MicDrop provides Windows, Android, and iPhone WebRTC/Opus playback, microphone
-return and duplex audio over paired LAN or remote connections. The Windows
-desktop app owns host settings, pairing approval and logs; Android foreground
+MicDrop provides Windows x64, Linux x64, and macOS arm64 desktop hosts with
+Android and iPhone WebRTC/Opus playback, microphone return and duplex audio
+over paired LAN or remote connections. The Windows desktop app owns GUI host
+settings, pairing approval and logs, while `micdrop-host` provides full CLI
+host support on Linux x64 and macOS arm64 (macOS 14.2+); Android foreground
 services and iOS background audio sessions own screen-off playback/capture. The
 [roadmap](ROADMAP.md) summarizes completed functional checks and the hardware or
 physical-measurement limits that remain. [Release preparation](RELEASING.md)
 covers versioned development packages and unpublished drafts.
 
 Both mobile interfaces match the Windows slate/gold palette. **Diagnostics**
-contains reports, notices and a local output check. Windows capture/WAV and
-shared C++ tone diagnostics remain available for host testing.
+contains reports, notices and a local output check. Desktop capture/WAV and
+shared C++ tone diagnostics remain available across Windows, Linux, and macOS.
 
 ## Toolchain
 
 | Component | Version / requirement |
 | --- | --- |
 | Go | 1.26.7, pinned in `go.mod` |
-| Host C++ | C++20; MinGW-w64 GCC/G++ for cgo; MSVC 2022 x64 for the WebRTC DLL |
+| Host C++ | C++20; Windows: MinGW-w64 GCC/G++ for cgo and MSVC 2022 x64 for `micdrop_rtc.dll`; Linux x64 / macOS arm64: system GCC or Xcode Clang for cgo and pinned Chromium Clang/libc++ for `libmicdrop_rtc.{so,dylib}` |
 | Host CMake | 3.22 or newer |
+| macOS host | macOS 14.2+ (Sonoma or newer) on Apple Silicon (`arm64`) with Xcode Command Line Tools / SDK |
+| Linux host | x86\_64 Linux with glibc 2.35+ (`ubuntu-22.04` / `ubuntu-24.04`+) and PipeWire (`pipewire-pulse`) or PulseAudio (`libpulse.so.0`) |
 | Android | Android 12 / API 31+, arm64-v8a app |
 | JDK | 17 |
 | Gradle | 8.13, wrapper with distribution SHA-256 verification |
@@ -32,7 +36,7 @@ shared C++ tone diagnostics remain available for host testing.
 | Swift | 6.3 toolchain (Xcode 26.6; Linux `swift:6.3.3-noble` by digest); Swift 5 language mode |
 | XcodeGen | 2.46.0 release zip, SHA-256 `4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806` |
 | SwiftPM packages | Exact versions in `apps/ios/MicDropKit/Package.swift`; pins in its `Package.resolved`; see [iPhone provenance](../third_party/IOS.md) |
-| WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Android and iPhone; checksummed assets in the lock file |
+| WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Linux, macOS, Android, and iPhone; checksummed assets in the lock file |
 | Dependency fetcher | Python 3.11+ |
 
 These are selected compatible versions, not a claim that they are the newest.
@@ -50,16 +54,19 @@ compiles that same file for native tests. Keeping the Go binding and
 C++ source together also avoids stale Go build-cache entries for externally
 included C++ implementations.
 
-The Windows capture binding likewise lives beside `capture_windows.cc` in
-`native/platform/windows`. Its Windows headers and system libraries are isolated
-from the Android build; Linux uses an explicit unsupported-platform stub.
+The desktop capture bindings likewise live beside `capture_windows.cc`,
+`capture_linux.cc`, and `capture_darwin.cc` / `tap_darwin.m` in
+`native/platform/windows`. Platform headers and system libraries are isolated
+from the Android build; other architectures use an explicit unsupported-platform stub.
 
 This host is not a pure-Go cross-compilation target: cgo requires a native C/C++
-toolchain for the destination. The Go build uses MinGW-w64 GCC/G++; MSVC builds
-`micdrop_rtc.dll` separately with the matching static C++ runtime. The executable
-loads that DLL through a C ABI; it does not link MSVC C++ objects into cgo.
-Linux runs portable contracts/CLI checks and is not a supported desktop-audio
-platform yet. See [the WebRTC build record](../third_party/WEBRTC.md).
+toolchain for the destination. On Windows, the Go build uses MinGW-w64 GCC/G++
+and MSVC builds `micdrop_rtc.dll` separately with the matching static C++
+runtime. On Linux x64 and macOS arm64, cgo uses GCC or Xcode Clang while CMake
+compiles `libmicdrop_rtc.so` / `libmicdrop_rtc.dylib` with the pinned Chromium
+Clang and `libc++` headers fetched by `tools/fetch_webrtc.py`. The Go executable
+loads the WebRTC shared library through a pure C ABI; C++ objects never cross
+into cgo. See [the WebRTC build record](../third_party/WEBRTC.md).
 
 ## Microphone return and endpoint diagnostics
 
@@ -230,9 +237,89 @@ cmake --build build/native --config Release
 ctest --test-dir build/native -C Release --output-on-failure
 ```
 
-On Linux, the same CMake commands and `go test ./...` work with GCC/G++, Go, and
-`CGO_ENABLED=1`. A host binary can be built with
-`go build -o build/micdrop-host ./apps/windows-host`.
+### Linux and macOS CLI host
+
+On Linux x64 (`ubuntu-22.04` / `ubuntu-24.04`+) or macOS arm64 (macOS 14.2+ with Xcode Command Line Tools), fetch the verified WebRTC archive and matching Chromium Clang/`libc++` toolchain, build `libmicdrop_rtc.so` or `libmicdrop_rtc.dylib` in **Release**, and build `micdrop-host`:
+
+```sh
+# Replace 'linux' with 'macos' on Apple Silicon macOS:
+python3 tools/fetch_webrtc.py linux
+cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release -DMICDROP_BUILD_RTC=ON
+cmake --build build/native --config Release --parallel 4
+ctest --test-dir build/native -C Release --output-on-failure
+
+mkdir -p build/host
+CGO_ENABLED=1 go build -trimpath -o build/host/micdrop-host ./apps/windows-host
+# On Linux:
+cp build/native/native/rtc/libmicdrop_rtc.so build/host/
+# On macOS:
+# cp build/native/native/rtc/libmicdrop_rtc.dylib build/host/
+# codesign --force --sign - build/host/libmicdrop_rtc.dylib build/host/micdrop-host
+
+./build/host/micdrop-host doctor
+./build/host/micdrop-host rtc-check
+./build/host/micdrop-host devices
+./build/host/micdrop-host bridge-devices
+./build/host/micdrop-host stream --host 192.168.1.10 --paired --pair
+```
+
+All CLI subcommands (`version`, `doctor`, `rtc-check`, `devices`, `bridge-devices`,
+`bridge-check`, `capture`, `tone`, `identity init|status`, `remote import|status|forget`,
+and `stream`) work identically to `windows-host.exe`. Host identity, paired phone
+records, and remote settings are stored under `os.UserConfigDir()/MicDrop`
+(`~/.config/MicDrop` on Linux, `~/Library/Application Support/MicDrop` on macOS)
+encrypted with a user-only (`0600`) AES-256-GCM master key and guarded by `flock`.
+See [PLATFORM_AUDIO.md](PLATFORM_AUDIO.md) for PipeWire/PulseAudio `module-null-sink`
+and macOS CoreAudio Process Tap / BlackHole virtual cable setup.
+
+### Linux desktop app (`micdrop-host desktop`)
+
+On x86\_64 Linux, the same `micdrop-host` binary includes the native GTK3 desktop
+UI (`internal/desktop/gtk_linux_amd64.c`, `ui_linux_amd64.go`) with full feature
+parity to `MicDrop.exe` and `MicDrop.app`. Because GTK3, GDK3, Cairo, GIO, and
+optional AppIndicator libraries are loaded at runtime via `dlopen`, compiling
+`micdrop-host` does not require `-dev` GTK headers and headless servers/containers
+do not need GUI packages installed to run CLI subcommands.
+
+```sh
+# Launch the Linux desktop UI (requires an active Wayland or X11 session + libgtk-3-0 / libgtk-3-0t64):
+./build/host/micdrop-host desktop
+
+# Optional: register or remove a per-user XDG application launcher (~/.local/share/applications/micdrop.desktop):
+./build/host/micdrop-host desktop --install-launcher
+./build/host/micdrop-host desktop --uninstall-launcher
+
+# Run the automated GTK3 desktop UI contract checks on a headless machine using Xvfb:
+xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
+```
+
+See [Linux desktop](LINUX_DESKTOP.md) for XDG autostart, optional AppIndicator
+panel tray behavior, and PipeWire/PulseAudio virtual microphone setup.
+
+### macOS desktop app (`MicDrop.app`)
+
+On Apple Silicon macOS (macOS 14.2+), the same `apps/windows-host` package also
+compiles the native AppKit desktop app (`MicDrop.app`) sharing `internal/desktop`
+with full feature parity to `MicDrop.exe` (audio routing, LAN/remote config, QR
+pairing, phone settings editor, SF Symbols menu bar item, and per-user
+`LaunchAgents` login startup). Assemble and verify the bundle with
+`tools/macos_app_bundle.py`:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=14.2 CGO_ENABLED=1 go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
+python3 tools/macos_app_bundle.py build \
+  --executable build/macos-app/MicDrop-bin \
+  --rtc-dylib build/native/native/rtc/libmicdrop_rtc.dylib \
+  --webrtc-notice .deps/webrtc/macos/webrtc/NOTICE \
+  --webrtc-versions .deps/webrtc/macos/webrtc/VERSIONS \
+  --output-app build/macos-app/MicDrop.app
+rm -f build/macos-app/MicDrop-bin
+codesign --force --sign - build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib
+codesign --force --sign - build/macos-app/MicDrop.app
+```
+
+See [macOS desktop](MACOS_DESKTOP.md) for bundle details, TCC privacy keys, and
+menu-bar / LaunchAgent behavior.
 
 ## Android app
 
@@ -553,14 +640,19 @@ contains internal reports, ADB commands or latency tooling.
 
 ## CI and dependency provenance
 
-`.github/workflows/build.yml` runs native C/C++ contracts, Go tests and vet on
-GitHub-hosted `ubuntu-24.04` and `windows-2022` runners (`persist-credentials: false`),
-including PCM conversion and recording contracts, standalone rendezvous service and
-systemd verification, and the Android arm64 APK build, lint and JVM contracts.
+`.github/workflows/build.yml` runs native WebRTC and C/C++ contracts, Go tests and vet on
+GitHub-hosted `ubuntu-24.04`, `windows-2022`, and `macos-26` runners (`persist-credentials: false`),
+including PCM conversion, recording, ICE gathering, TURN TLS certificate verification, and
+encoded/decoded stereo and duplex WebRTC round trips across all three desktop OSes, plus
+standalone rendezvous service and systemd verification and the Android arm64 APK build,
+lint and JVM contracts.
 A separate API 35 KVM emulator job on `ubuntu-24.04` checks Android Keystore signing
 and Conscrypt mutual TLS. Linux checks the known-offset measurement fixtures in an
-isolated Python virtual environment. Windows also builds the WASAPI code with MSVC
-and MinGW and checks native cancellation/ownership without requiring a physical endpoint.
+isolated Python virtual environment. Windows, Linux (`linux-x64-host`:
+`MicDrop-linux-x64-host.tar.gz`), and macOS (`macos-arm64-host`:
+`MicDrop-macos-arm64-host.tar.gz`) jobs also package, extract, and smoke-test the
+Go CLI host with its native WebRTC shared library (`doctor`, `rtc-check`, and
+`tone`) without requiring a physical audio endpoint.
 
 On pushes to `main` and manual workflow runs (`upload_artifacts` defaults to `true`),
 CI uploads build outputs and verification reports to GitHub Actions for 14 days

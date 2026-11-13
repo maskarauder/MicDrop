@@ -8,6 +8,84 @@
       "name": "webrtc.windows_x86_64.zip",
       "sha256": "8f1fa89b9b26623f309b79bb264b752814fa5f10bae129e8d4968db9e19e7200"
     },
+    "linux": {
+      "build_version": "m155.8059.2.0",
+      "builder_commit": "5ef3d36e4562120cae0e597c3923b8532b0821ca",
+      "webrtc_commit": "f89edcb7be1f4be029ee7186e36b2b35ec03373e",
+      "name": "webrtc.ubuntu-22.04_x86_64.tar.gz",
+      "sha256": "6f082d9869bcfd34d31c7ba9a9a4734696fed56c81ee7e003bd6a488cb8a517d",
+      "size": 115195107,
+      "toolchain": {
+        "tools_commit": "bbae40a5511ca4ea79ab1db39e0ed272295d0dc3",
+        "buildtools_commit": "c202b4a9dac30e789ed6e3b2354efa94357a56f3",
+        "archives": [
+          {
+            "name": "clang-Linux_x64-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "url": "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/clang-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "sha256": "83f4a4ea3292bfc236d85575fa7af27d39180d88534bc3117b73ad1df34bb959",
+            "size": 57243988
+          }
+        ],
+        "libcxx": {
+          "repository": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git",
+          "commit": "97b436da4c33663581d394f4ee0a5977fc38c2f4",
+          "upstream_llvm_commit": "16ffd27e3737c01cbabad6eed77b919dc977ad6c",
+          "tree_sha256": "94e9d2b12fa65372894f7839d904aefefdc9c2e22bdeb5bf58c8da8f986e7700",
+          "config_site": {
+            "url": "https://chromium.googlesource.com/chromium/src/buildtools/+/c202b4a9dac30e789ed6e3b2354efa94357a56f3/third_party/libc++/__config_site?format=TEXT",
+            "sha256": "fcac9dc8ea709997ab8b43af6c4e4e2a3674531c6f6303ca42eaf1e3fe189064",
+            "size": 4119
+          },
+          "assertion_handler": {
+            "url": "https://chromium.googlesource.com/chromium/src/buildtools/+/c202b4a9dac30e789ed6e3b2354efa94357a56f3/third_party/libc++/__assertion_handler?format=TEXT",
+            "sha256": "6f9934bea04c9e23f264a82725925354274af6ca2651a1056a737f96a73d0193",
+            "size": 1200
+          }
+        }
+      }
+    },
+    "macos": {
+      "build_version": "m155.8059.2.0",
+      "builder_commit": "5ef3d36e4562120cae0e597c3923b8532b0821ca",
+      "webrtc_commit": "f89edcb7be1f4be029ee7186e36b2b35ec03373e",
+      "name": "webrtc.macos_arm64.tar.gz",
+      "sha256": "cf5ecd2fbb2d812e568688ad7c2a61d9c28a9d2ce54cc20fc5f5a98644a5ea6f",
+      "size": 333568436,
+      "toolchain": {
+        "tools_commit": "bbae40a5511ca4ea79ab1db39e0ed272295d0dc3",
+        "buildtools_commit": "c202b4a9dac30e789ed6e3b2354efa94357a56f3",
+        "archives": [
+          {
+            "name": "clang-Mac_arm64-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "url": "https://commondatastorage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "sha256": "b1d5d53f8dba60834fc3287ff53276fbed4273eee6a8f31a1ff7825f91db77c1",
+            "size": 47539924
+          },
+          {
+            "name": "clang-mac-runtime-library-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "url": "https://commondatastorage.googleapis.com/chromium-browser-clang/Mac/clang-mac-runtime-library-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+            "sha256": "dd5c1da410296c96792bae2c3b79127ae1e53a853521e241088a229fa9a20b3b",
+            "size": 981676
+          }
+        ],
+        "libcxx": {
+          "repository": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git",
+          "commit": "97b436da4c33663581d394f4ee0a5977fc38c2f4",
+          "upstream_llvm_commit": "16ffd27e3737c01cbabad6eed77b919dc977ad6c",
+          "tree_sha256": "94e9d2b12fa65372894f7839d904aefefdc9c2e22bdeb5bf58c8da8f986e7700",
+          "config_site": {
+            "url": "https://chromium.googlesource.com/chromium/src/buildtools/+/c202b4a9dac30e789ed6e3b2354efa94357a56f3/third_party/libc++/__config_site?format=TEXT",
+            "sha256": "fcac9dc8ea709997ab8b43af6c4e4e2a3674531c6f6303ca42eaf1e3fe189064",
+            "size": 4119
+          },
+          "assertion_handler": {
+            "url": "https://chromium.googlesource.com/chromium/src/buildtools/+/c202b4a9dac30e789ed6e3b2354efa94357a56f3/third_party/libc++/__assertion_handler?format=TEXT",
+            "sha256": "6f9934bea04c9e23f264a82725925354274af6ca2651a1056a737f96a73d0193",
+            "size": 1200
+          }
+        }
+      }
+    },
     "android": {
       "build_version": "m155.8059.2.0",
       "builder_commit": "5ef3d36e4562120cae0e597c3923b8532b0821ca",

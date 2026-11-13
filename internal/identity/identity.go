@@ -19,9 +19,9 @@ import (
 )
 
 var (
-	ErrUnsupported = errors.New("protected host identity storage requires Windows")
+	ErrUnsupported = errors.New("protected host identity storage requires Windows, Linux, or macOS")
 	ErrUnavailable = errors.New("host identity storage is unavailable; no identity was replaced")
-	ErrInvalid     = errors.New("host identity cannot be read or validated; preserve the file and use the original Windows account")
+	ErrInvalid     = errors.New("host identity cannot be read or validated; preserve the file and use the original user account")
 )
 
 // Identity deliberately exposes neither key export nor JSON private material.
@@ -68,7 +68,7 @@ func PublicKeyFingerprint(key crypto.PublicKey) (string, error) {
 func (i *Identity) Info() Info {
 	fingerprint, _ := PublicKeyFingerprint(&i.key.PublicKey)
 	return Info{Version: 1, Algorithm: "ECDSA_P256", Fingerprint: fingerprint,
-		CreatedAt: i.created, Protection: "windows_dpapi_current_user"}
+		CreatedAt: i.created, Protection: protectionLabel()}
 }
 func (i *Identity) MarshalJSON() ([]byte, error) { return json.Marshal(i.Info()) }
 func (i *Identity) String() string               { return "MicDrop host identity " + i.Info().Fingerprint }

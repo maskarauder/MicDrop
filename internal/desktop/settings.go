@@ -1,4 +1,4 @@
-// Package desktop owns the Windows desktop host's preferences and lifecycle.
+// Package desktop owns the desktop host's preferences and lifecycle.
 // It does not process audio, store credentials, or authorize phone capture.
 package desktop
 
@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 )
@@ -31,10 +32,17 @@ func Defaults() Settings {
 	return Settings{Version: 1, Port: 9844, Notifications: true, SaveLogs: true}
 }
 
+func userDataRootForOS(goos string) (string, error) {
+	if goos == "windows" {
+		return os.UserCacheDir() // %LOCALAPPDATA% on Windows, not the executable directory.
+	}
+	return os.UserConfigDir() // ~/Library/Application Support on macOS; $XDG_CONFIG_HOME (~/.config) on Linux.
+}
+
 func Directory() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil || !filepath.IsAbs(base) {
-		return "", errors.New("Windows user data directory is unavailable")
+	base, err := userDataRootForOS(runtime.GOOS)
+	if err != nil || base == "" || !filepath.IsAbs(base) {
+		return "", errors.New("user data directory is unavailable")
 	}
 	return filepath.Join(base, "MicDrop"), nil
 }

@@ -85,12 +85,36 @@ func (d *desktopStream) command(command desktop.Command, manager *pairing.Manage
 	d.phones(manager)
 }
 
-func runDesktop(args []string, stderr io.Writer) int {
+func runDesktop(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("desktop", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	background := flags.Bool("background", false, "start the saved host in the notification area")
+	installLauncher := flags.Bool("install-launcher", false, "install XDG application launcher entry (Linux)")
+	uninstallLauncher := flags.Bool("uninstall-launcher", false, "remove XDG application launcher entry (Linux)")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return 2
+	}
+	if (*installLauncher && *uninstallLauncher) || ((*installLauncher || *uninstallLauncher) && *background) {
+		fmt.Fprintln(stderr, "desktop --install-launcher, --uninstall-launcher, and --background cannot be combined")
+		return 2
+	}
+	if *installLauncher {
+		path, err := desktop.InstallLauncher()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Installed desktop launcher %s\n", path)
+		return 0
+	}
+	if *uninstallLauncher {
+		path, err := desktop.UninstallLauncher()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Removed desktop launcher %s\n", path)
+		return 0
 	}
 	directory, err := desktop.Directory()
 	if err == nil {

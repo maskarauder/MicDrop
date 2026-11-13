@@ -47,8 +47,8 @@ func DefaultDirectory() (string, error) {
 	if _, err := platformProtector(); err != nil {
 		return "", err
 	}
-	base, err := os.UserCacheDir() // %LOCALAPPDATA% on Windows, not the executable directory.
-	if err != nil || !filepath.IsAbs(base) {
+	base, err := userDataRoot()
+	if err != nil || base == "" || !filepath.IsAbs(base) {
 		return "", ErrUnavailable
 	}
 	return filepath.Join(base, "MicDrop", "identity"), nil

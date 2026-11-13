@@ -14,14 +14,15 @@ func TestIdentityCommandsValidateArguments(t *testing.T) {
 			t.Fatalf("%v returned %d", args, code)
 		}
 	}
-	if runtime.GOOS != "windows" && run([]string{"identity", "init", "--state-dir", t.TempDir()}, io.Discard, io.Discard) != 1 {
+	supported := runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+	if !supported && run([]string{"identity", "init", "--state-dir", t.TempDir()}, io.Discard, io.Discard) != 1 {
 		t.Fatal("unsupported platform initialized identity")
 	}
 }
 
 func TestWindowsIdentityCommandsExposeOnlyPublicStatus(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("requires current-user DPAPI")
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("requires protected host identity storage")
 	}
 	directory := t.TempDir()
 	var output, stderr bytes.Buffer

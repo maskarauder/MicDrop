@@ -29,8 +29,9 @@ jobs:
         include:
           - os: ubuntu-24.04
           - os: windows-2022
+          - os: macos-26
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -61,16 +62,54 @@ jobs:
             $gccDir = Split-Path -Parent (Get-Command gcc.exe -ErrorAction Stop).Source
             $gccDir | Out-File -FilePath $env:GITHUB_PATH -Append
           }
-      - name: Fetch verified native WebRTC
+          'CC=gcc' | Out-File -FilePath $env:GITHUB_ENV -Append
+          'CXX=g++' | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Select the Linux cgo toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "CXX=g++" >> "$GITHUB_ENV"
+      - name: Select Xcode 26+ and macOS cgo toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+            dev_dir=/Applications/Xcode_26.6.app/Contents/Developer
+          else
+            dev_dir=/Applications/Xcode.app/Contents/Developer
+          fi
+          export DEVELOPER_DIR="$dev_dir"
+          echo "DEVELOPER_DIR=$dev_dir" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+          if ! command -v python >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/pybin"
+            ln -s "$(command -v python3)" "$RUNNER_TEMP/pybin/python"
+            echo "$RUNNER_TEMP/pybin" >> "$GITHUB_PATH"
+          fi
+          sw_vers
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          cmake --version
+          python3 --version
+      - name: Fetch verified native WebRTC (Windows)
         if: runner.os == 'Windows'
         run: python tools/fetch_webrtc.py windows
-      - name: Configure portable contracts
+      - name: Fetch verified native WebRTC (Linux)
+        if: runner.os == 'Linux'
+        run: python3 tools/fetch_webrtc.py linux
+      - name: Fetch verified native WebRTC (macOS)
+        if: runner.os == 'macOS'
+        run: python3 tools/fetch_webrtc.py macos
+      - name: Configure Unix WebRTC and contracts
         if: runner.os != 'Windows'
-        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release -DMICDROP_BUILD_RTC=ON
       - name: Configure Windows WebRTC and contracts
         if: runner.os == 'Windows'
         run: cmake -S . -B build/native -A x64 -DMICDROP_BUILD_RTC=ON
-      - run: cmake --build build/native --config Release
+      - run: cmake --build build/native --config Release --parallel 4
       - run: ctest --test-dir build/native -C Release --output-on-failure --verbose
       - name: Validate shared version and draft-release boundaries
         run: |
@@ -100,12 +139,14 @@ jobs:
       - name: Validate native dependency selection and checksums
         if: runner.os == 'Linux'
         run: python -m unittest discover -s tools -p 'test_fetch_webrtc.py' -v
-      - name: Validate iPhone bundle and Swift package pin checks
+      - name: Validate iPhone, macOS, and Unix host packaging checks
         if: runner.os == 'Linux'
         run: |
           python -m unittest discover -s tools -p 'test_ios_bundle.py' -v
           python -m unittest discover -s tools -p 'test_swiftpm_pins.py' -v
           python -m unittest discover -s tools -p 'test_ios_version.py' -v
+          python -m unittest discover -s tools -p 'test_macos_app_bundle.py' -v
+          python -m unittest discover -s tools -p 'test_package_unix_host.py' -v
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
       - name: Validate Android page-size rejection checks
         if: runner.os == 'Linux'
@@ -125,15 +166,75 @@ jobs:
       - name: Go tests and native binding
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go test ./...
       - name: Go static checks
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go vet ./...
+      - name: Check native macOS desktop controls
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          MICDROP_DESKTOP_PREVIEW_DIR: ${{ github.workspace }}/build/macos-desktop-preview
+        run: go test -count=1 -v ./internal/desktop
+      - name: Retain macOS desktop UI preview
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.upload_artifacts == true }}
+          name: macos-desktop-preview
+          path: build/macos-desktop-preview/*.png
+          if-no-files-found: error
+          retention-days: 14
+      - name: Check native Linux desktop controls
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          MICDROP_DESKTOP_PREVIEW_DIR: ${{ github.workspace }}/build/linux-desktop-preview
+        run: |
+          set -euo pipefail
+          if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xauth >/dev/null 2>&1 || ! ldconfig -p | grep -q 'libgtk-3\.so\.0'; then
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              for mirror in \
+                "https://mirrors.edge.kernel.org/ubuntu/" \
+                "https://ftp.osuosl.org/pub/ubuntu/" \
+                "http://azure.archive.ubuntu.com/ubuntu/" \
+                "https://archive.ubuntu.com/ubuntu/"; do
+                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
+                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
+                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+                  break
+                fi
+              done
+            fi
+            APT_OPTS=(
+              -o Acquire::ForceIPv4=true
+              -o Acquire::Retries=1
+              -o Acquire::http::Timeout=5
+              -o Acquire::https::Timeout=5
+              -o Acquire::http::No-Cache=false
+              -o Acquire::https::No-Cache=false
+            )
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
+            GTK_PKG="libgtk-3-0t64"
+            if ! apt-cache show "$GTK_PKG" >/dev/null 2>&1; then
+              GTK_PKG="libgtk-3-0"
+            fi
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
+              xvfb xauth fonts-dejavu-core adwaita-icon-theme "$GTK_PKG"
+          fi
+          G_DEBUG=fatal-criticals xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
+      - name: Retain Linux desktop UI preview
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.upload_artifacts == true }}
+          name: linux-desktop-preview
+          path: build/linux-desktop-preview/*.png
+          if-no-files-found: error
+          retention-days: 14
       - name: Check native Windows desktop controls
         if: runner.os == 'Windows'
         shell: pwsh
@@ -160,18 +261,298 @@ jobs:
             windres desktop.rc -O coff -o ../desktop_windows_amd64.syso
             if ($LASTEXITCODE -ne 0) { throw 'Could not compile the desktop manifest.' }
           } finally { Pop-Location }
-      - name: Build host harness
+      - name: Build Windows host harness
+        if: runner.os == 'Windows'
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go build -trimpath -o build/host/ ./apps/windows-host
+      - name: Build and package Unix CLI host distribution
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          rm -rf build/host build/host-dist
+          mkdir -p build/host build/host-dist
+          go build -trimpath -o build/host/micdrop-host ./apps/windows-host
+          cp LICENSE NOTICE build/host/
+          cp third_party/QR-CODE-NOTICE.txt third_party/DISCOVERY-NOTICES.txt third_party/WEBSOCKET-NOTICE.txt build/host/
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cp build/native/native/rtc/libmicdrop_rtc.dylib build/host/
+            cp .deps/webrtc/macos/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
+            cp .deps/webrtc/macos/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
+            codesign --force --sign - build/host/libmicdrop_rtc.dylib build/host/micdrop-host
+            python3 tools/package_unix_host.py package \
+              --platform macos-arm64 \
+              --stage-dir build/host \
+              --output build/host-dist/MicDrop-macos-arm64-host.tar.gz
+          else
+            cp build/native/native/rtc/libmicdrop_rtc.so build/host/
+            cp .deps/webrtc/linux/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
+            cp .deps/webrtc/linux/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
+            python3 tools/package_unix_host.py package \
+              --platform linux-x64 \
+              --stage-dir build/host \
+              --output build/host-dist/MicDrop-linux-x64-host.tar.gz
+          fi
+          rm -rf build/host
+      - name: Verify extracted Unix CLI host distribution
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build/host-extracted
+          mkdir -p build/host-extracted
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ARCHIVE="build/host-dist/MicDrop-macos-arm64-host.tar.gz"
+            EXTRACT_DIR="build/host-extracted/MicDrop-macos-arm64-host"
+            RTC_LIB="$EXTRACT_DIR/libmicdrop_rtc.dylib"
+            python3 tools/package_unix_host.py check --platform macos-arm64 --archive "$ARCHIVE"
+          else
+            ARCHIVE="build/host-dist/MicDrop-linux-x64-host.tar.gz"
+            EXTRACT_DIR="build/host-extracted/MicDrop-linux-x64-host"
+            RTC_LIB="$EXTRACT_DIR/libmicdrop_rtc.so"
+            python3 tools/package_unix_host.py check --platform linux-x64 --archive "$ARCHIVE"
+          fi
+          # Simulate actions/upload-artifact@v4 stripping outer file permissions before extraction.
+          chmod 0644 "$ARCHIVE"
+          tar -xzf "$ARCHIVE" -C build/host-extracted
+          HOST_BIN="$EXTRACT_DIR/micdrop-host"
+          test -x "$HOST_BIN"
+          test -x "$RTC_LIB"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            codesign --verify --strict --verbose=2 "$RTC_LIB" "$HOST_BIN"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            if readelf -d "$HOST_BIN" | grep -E 'NEEDED.*(gtk|gdk|cairo|X11|wayland)'; then
+              echo "Unexpected hard GUI shared-library dependency in micdrop-host" >&2
+              exit 1
+            fi
+            XDG_DATA_TEST="$RUNNER_TEMP/micdrop-xdg-data"
+            rm -rf "$XDG_DATA_TEST"
+            env -u DISPLAY -u WAYLAND_DISPLAY XDG_DATA_HOME="$XDG_DATA_TEST" "$HOST_BIN" desktop --install-launcher
+            test -f "$XDG_DATA_TEST/applications/micdrop.desktop"
+            env -u DISPLAY -u WAYLAND_DISPLAY XDG_DATA_HOME="$XDG_DATA_TEST" "$HOST_BIN" desktop --uninstall-launcher
+            test ! -e "$XDG_DATA_TEST/applications/micdrop.desktop"
+          fi
+          "$HOST_BIN" version
+          "$HOST_BIN" doctor
+          "$HOST_BIN" rtc-check
+          "$HOST_BIN" tone --output build/ci-tone.wav --duration 25ms
+      - name: Verify live Linux PulseAudio loopback and virtual cable audio
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_BIN="./build/host-extracted/MicDrop-linux-x64-host/micdrop-host"
+          test -x "$HOST_BIN"
+          if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v pactl >/dev/null 2>&1; then
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              for mirror in \
+                "https://mirrors.edge.kernel.org/ubuntu/" \
+                "https://ftp.osuosl.org/pub/ubuntu/" \
+                "http://azure.archive.ubuntu.com/ubuntu/" \
+                "https://archive.ubuntu.com/ubuntu/"; do
+                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
+                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
+                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+                  break
+                fi
+              done
+            fi
+            APT_OPTS=(
+              -o Acquire::ForceIPv4=true
+              -o Acquire::Retries=1
+              -o Acquire::http::Timeout=5
+              -o Acquire::https::Timeout=5
+              -o Acquire::http::No-Cache=false
+              -o Acquire::https::No-Cache=false
+            )
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends pulseaudio pulseaudio-utils
+          fi
+          PA_DIR="$RUNNER_TEMP/micdrop-pulse"
+          mkdir -m 700 -p "$PA_DIR/runtime" "$PA_DIR/state"
+          export XDG_RUNTIME_DIR="$PA_DIR/runtime"
+          export PULSE_RUNTIME_PATH="$PA_DIR/runtime"
+          export PULSE_STATE_PATH="$PA_DIR/state"
+          export PULSE_SERVER="unix:$PA_DIR/runtime/native"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$PA_DIR/no-dbus"
+          PA_PID=""
+          cleanup_pulse() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ -f "$PA_DIR/pulse.log" ]; then
+              cat "$PA_DIR/pulse.log" >&2 || true
+            fi
+            if [ -n "$PA_PID" ]; then
+              kill "$PA_PID" >/dev/null 2>&1 || true
+              for _ in $(seq 1 10); do
+                kill -0 "$PA_PID" 2>/dev/null || break
+                sleep 0.1
+              done
+              kill -9 "$PA_PID" >/dev/null 2>&1 || true
+              wait "$PA_PID" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_pulse EXIT
+          env -u RUNNER_TRACKING_ID pulseaudio --daemonize=no --exit-idle-time=-1 --log-target="file:$PA_DIR/pulse.log" -n \
+            -L "module-native-protocol-unix auth-anonymous=1 socket=$PA_DIR/runtime/native" \
+            -L "module-null-sink sink_name=MicDropDesktop rate=48000 channels=2 sink_properties=device.description=MicDrop_Desktop" \
+            -L "module-null-sink sink_name=MicDropCable rate=48000 channels=2 sink_properties=device.description=MicDrop_Cable" \
+            -L "module-remap-source source_name=MicDropVirtualMic master=MicDropCable.monitor source_properties=device.description=MicDrop_Virtual_Mic" \
+            </dev/null >/dev/null 2>&1 &
+          PA_PID=$!
+          for _ in $(seq 1 50); do
+            if [ -S "$PA_DIR/runtime/native" ] && timeout 3s pactl info >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$PA_PID" 2>/dev/null; then
+              exit 1
+            fi
+            sleep 0.1
+          done
+          timeout 5s pactl info >/dev/null
+          timeout 5s pactl set-default-sink MicDropDesktop
+          timeout 5s pactl set-default-source MicDropVirtualMic
+
+          mkdir -p build/linux-audio-check
+          timeout 10s "$HOST_BIN" devices > build/linux-audio-check/devices.json
+          timeout 10s "$HOST_BIN" bridge-devices > build/linux-audio-check/bridge-devices.json
+
+          # Missing explicit endpoints must fail closed rather than falling back to default.
+          if timeout 10s "$HOST_BIN" capture --device MissingSink --duration 100ms >/dev/null 2>&1; then
+            echo "Expected missing explicit sink to fail closed" >&2
+            exit 1
+          fi
+
+          # Simultaneously inject synthetic stereo tone into MicDropCable and capture from its monitor.
+          # PulseAudio module-null-sink sleeps in 2s BLOCK_USEC intervals while idle, so allow 2.2s
+          # for the sink thread to wake into low-latency streaming before starting the 2.5s capture.
+          timeout 20s "$HOST_BIN" bridge-check \
+            --render-device MicDropCable \
+            --duration 6000ms \
+            > build/linux-audio-check/bridge-cable.json &
+          BRIDGE_PID=$!
+          sleep 2.2
+          timeout 15s "$HOST_BIN" capture \
+            --device MicDropCable \
+            --duration 2500ms \
+            --output build/linux-audio-check/cable-loopback.wav \
+            > build/linux-audio-check/capture-cable.json
+          wait "$BRIDGE_PID"
+
+          # Verify default output sink resolution (no --device flag) with live audio.
+          timeout 20s "$HOST_BIN" bridge-check \
+            --render-device MicDropDesktop \
+            --duration 6000ms \
+            > build/linux-audio-check/bridge-default.json &
+          DEF_BRIDGE_PID=$!
+          sleep 2.2
+          timeout 15s "$HOST_BIN" capture \
+            --duration 2500ms \
+            > build/linux-audio-check/capture-default.json
+          wait "$DEF_BRIDGE_PID"
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          base = Path("build/linux-audio-check")
+          devices = json.loads((base / "devices.json").read_text(encoding="utf-8"))
+          by_id = {d["id"]: d for d in devices}
+          assert by_id["MicDropDesktop"]["default_multimedia"] is True, devices
+          assert by_id["MicDropCable"]["default_multimedia"] is False, devices
+
+          bridge_devs = json.loads((base / "bridge-devices.json").read_text(encoding="utf-8"))
+          render_ids = {d["id"] for d in bridge_devs["render_endpoints"]}
+          input_ids = {d["id"] for d in bridge_devs["recording_endpoints"]}
+          assert {"MicDropDesktop", "MicDropCable"} <= render_ids, bridge_devs
+          assert "MicDropVirtualMic" in input_ids, bridge_devs
+          assert "MicDropCable.monitor" not in input_ids, bridge_devs
+
+          bridge_report = json.loads((base / "bridge-cable.json").read_text(encoding="utf-8"))
+          assert bridge_report["render_device"]["id"] == "MicDropCable", bridge_report
+          assert bridge_report["submitted_frames"] == 288000, bridge_report
+
+          cap_cable = json.loads((base / "capture-cable.json").read_text(encoding="utf-8"))
+          assert cap_cable["device"]["id"] == "MicDropCable", cap_cable
+          assert cap_cable["frames"] >= 96000, cap_cable
+          assert len(cap_cable["channel_levels"]) == 2, cap_cable
+          for level in cap_cable["channel_levels"]:
+              assert 0.02 <= level["peak_linear"] <= 0.08, cap_cable
+              assert level["rms_linear"] > 0.005, cap_cable
+          wav_path = Path(cap_cable["wav_file"])
+          assert wav_path.is_file() and wav_path.stat().st_size > 384000, wav_path
+
+          cap_def = json.loads((base / "capture-default.json").read_text(encoding="utf-8"))
+          assert cap_def["device"]["id"] == "MicDropDesktop", cap_def
+          assert cap_def["device"]["default_multimedia"] is True, cap_def
+          assert cap_def["frames"] >= 96000, cap_def
+          assert cap_def["channel_levels"][0]["peak_linear"] >= 0.02, cap_def
+          print("Verified live Linux PulseAudio sink discovery, virtual mic bridge, and PCM loopback capture.")
+          PY
+      - name: Retain Linux CLI host
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: linux-x64-host
+          path: build/host-dist/MicDrop-linux-x64-host.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain macOS CLI host
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: macos-arm64-host
+          path: build/host-dist/MicDrop-macos-arm64-host.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build, sign, and verify macOS desktop app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          rm -rf build/macos-app build/macos-app-dist build/macos-app-extracted
+          mkdir -p build/macos-app build/macos-app-dist build/macos-app-extracted
+          go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
+          python3 tools/macos_app_bundle.py build \
+            --executable build/macos-app/MicDrop-bin \
+            --rtc-dylib build/native/native/rtc/libmicdrop_rtc.dylib \
+            --webrtc-notice .deps/webrtc/macos/webrtc/NOTICE \
+            --webrtc-versions .deps/webrtc/macos/webrtc/VERSIONS \
+            --output-app build/macos-app/MicDrop.app
+          rm -f build/macos-app/MicDrop-bin
+          codesign --force --sign - build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib
+          codesign --force --sign - build/macos-app/MicDrop.app
+          python3 tools/macos_app_bundle.py zip \
+            --app build/macos-app/MicDrop.app \
+            --output build/macos-app-dist/MicDrop-macos-arm64-app.zip
+          rm -rf build/macos-app
+          chmod 0644 build/macos-app-dist/MicDrop-macos-arm64-app.zip
+          ditto -x -k build/macos-app-dist/MicDrop-macos-arm64-app.zip build/macos-app-extracted
+          test -x build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop
+          codesign --verify --deep --strict --verbose=2 build/macos-app-extracted/MicDrop.app
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop version
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop doctor
+          ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop rtc-check
+      - name: Retain macOS desktop app
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: macos-arm64-app
+          path: build/macos-app-dist/MicDrop-macos-arm64-app.zip
+          if-no-files-found: error
+          retention-days: 14
       - name: Build Windows desktop app
         if: runner.os == 'Windows'
         env:
           CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
         run: go build -trimpath -ldflags="-H=windowsgui" -o build/host/MicDrop.exe ./apps/windows-host
       - name: Prepare Windows release payload and notices
         if: runner.os == 'Windows'

@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -104,8 +103,8 @@ func runStreamControlled(ctx context.Context, args []string, stdout, stderr io.W
 			return 2
 		}
 	}
-	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
-		fmt.Fprintln(stderr, "WebRTC streaming requires Windows x64")
+	if !streamingSupported() {
+		fmt.Fprintln(stderr, "WebRTC streaming requires Windows x64, Linux x64, or macOS arm64")
 		return 1
 	}
 	// Session setup/finalization callbacks also write to the console.

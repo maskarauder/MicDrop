@@ -3,6 +3,8 @@ package desktop
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +112,56 @@ func TestLegacyLoggingDefaultsAndRetentionValidation(t *testing.T) {
 		if settings.Validate() == nil {
 			t.Fatalf("accepted invalid retention %d", limit)
 		}
+	}
+}
+
+func TestDirectoryUsesPersistentStorageRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LocalAppData", filepath.Join(home, "AppData", "Local"))
+	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
+	_ = os.MkdirAll(filepath.Join(home, "Library", "Application Support"), 0o700)
+	_ = os.MkdirAll(filepath.Join(home, "Library", "Caches"), 0o700)
+
+	winRoot, err := userDataRootForOS("windows")
+	if wantCache, cacheErr := os.UserCacheDir(); cacheErr == nil && (err != nil || winRoot != wantCache) {
+		t.Fatalf("windows root = %q (%v), want %q", winRoot, err, wantCache)
+	}
+	unixRoot, err := userDataRootForOS("linux")
+	if wantConfig, cfgErr := os.UserConfigDir(); cfgErr == nil && (err != nil || unixRoot != wantConfig) {
+		t.Fatalf("unix root = %q (%v), want %q", unixRoot, err, wantConfig)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := Directory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(dir, filepath.Clean(cacheRoot)+string(filepath.Separator)) || dir == filepath.Clean(cacheRoot) {
+		t.Fatalf("Directory() resolved inside cache dir: %q (cache=%q)", dir, cacheRoot)
+	}
+	saved := Defaults()
+	saved.Interface = "en0"
+	saved.AddressHint = "192.168.1.42"
+	if err := SaveSettings(dir, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "MicDrop"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cacheRoot); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSettings(dir)
+	if err != nil || loaded != saved {
+		t.Fatalf("cache cleanup lost desktop settings: got=%+v err=%v", loaded, err)
 	}
 }

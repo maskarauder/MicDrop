@@ -1,7 +1,8 @@
 # Contributing
 
-The project has a Windows desktop host, Kotlin Android app, and Swift iPhone
-client for paired LAN/remote playback, microphone return and duplex audio.
+The project has Windows, Linux, and macOS desktop and CLI hosts, a Kotlin
+Android app, and a Swift iPhone client for paired LAN/remote playback,
+microphone return and duplex audio.
 Start with [Development](docs/DEVELOPMENT.md) for local toolchains, builds, and
 automated checks, and the [documentation index](docs/README.md) for user guides,
 technical contracts, and design records. [Releasing](docs/RELEASING.md) covers

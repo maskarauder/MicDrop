@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -50,7 +49,7 @@ func TestDoctorAndInvalidArguments(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.NativeABI != 1 || report.Streaming != (runtime.GOOS == "windows" && runtime.GOARCH == "amd64") {
+	if report.NativeABI != 1 || report.Streaming != streamingSupported() {
 		t.Fatalf("incorrect capabilities: %+v", report)
 	}
 	for _, args := range [][]string{nil, {"unknown"}, {"doctor", "extra"}, {"tone"}, {"tone", "--output", "unused.wav", "--duration", "-1s"},
@@ -80,10 +79,48 @@ func TestWAVWriteFailure(t *testing.T) {
 }
 
 func TestStreamRejectsUnsupportedPlatformBeforeListening(t *testing.T) {
-	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+	if streamingSupported() {
 		t.Skip("supported platform")
 	}
 	if code := run([]string{"stream", "--host", "192.168.1.2"}, io.Discard, io.Discard); code != 1 {
 		t.Fatalf("unsupported streaming returned %d", code)
+	}
+}
+
+func TestDefaultDesktopLaunchArguments(t *testing.T) {
+	cases := []struct {
+		arg0 string
+		args []string
+		goos string
+		want []string
+	}{
+		{`C:\Users\Alice\AppData\Local\Programs\MicDrop\MicDrop.exe`, nil, "windows", []string{"desktop"}},
+		{`C:\Users\Alice\AppData\Local\Programs\MicDrop\windows-host.exe`, nil, "windows", nil},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", nil, "darwin", []string{"desktop"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"-psn_0_12345"}, "darwin", []string{"desktop"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"--background"}, "darwin", []string{"desktop", "--background"}},
+		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"version"}, "darwin", []string{"version"}},
+		{"/usr/local/bin/micdrop-host", nil, "darwin", nil},
+		{"/usr/local/bin/micdrop-host", nil, "linux", nil},
+		{"/usr/local/bin/MicDrop", nil, "linux", []string{"desktop"}},
+		{"/usr/local/bin/micdrop-desktop", []string{"--background"}, "linux", []string{"desktop", "--background"}},
+		{"/usr/local/bin/MicDrop", []string{"doctor"}, "linux", []string{"doctor"}},
+	}
+	for _, tc := range cases {
+		got := defaultArgs(tc.arg0, tc.args, tc.goos)
+		if len(got) != len(tc.want) {
+			t.Fatalf("defaultArgs(%q, %v, %q) = %v, want %v", tc.arg0, tc.args, tc.goos, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("defaultArgs(%q, %v, %q)[%d] = %q, want %q", tc.arg0, tc.args, tc.goos, i, got[i], tc.want[i])
+			}
+		}
+	}
+	if run([]string{"desktop", "--install-launcher", "--uninstall-launcher"}, io.Discard, io.Discard) != 2 {
+		t.Fatal("accepted conflicting desktop launcher flags")
+	}
+	if run([]string{"desktop", "--install-launcher", "--background"}, io.Discard, io.Discard) != 2 {
+		t.Fatal("accepted conflicting desktop launcher and background flags")
 	}
 }

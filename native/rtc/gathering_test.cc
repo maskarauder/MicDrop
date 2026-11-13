@@ -1,5 +1,12 @@
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include "capi.h"
 #include <cstdio>
 #include <cstring>
@@ -11,6 +18,7 @@ using Peer = std::unique_ptr<mdr_peer, decltype(&mdr_destroy)>;
 // A bound UDP port deliberately sends no responses. This avoids ICMP "port
 // unreachable" and keeps an actual WebRTC gathering task pending at its deadline.
 struct SilentServer {
+#ifdef _WIN32
   SOCKET socket = INVALID_SOCKET;
   bool initialized = false;
   std::string port;
@@ -30,6 +38,24 @@ struct SilentServer {
     if (socket != INVALID_SOCKET) closesocket(socket);
     if (initialized) WSACleanup();
   }
+#else
+  int socket = -1;
+  std::string port;
+  SilentServer() {
+    socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socket < 0) return;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (::bind(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) return;
+    socklen_t length = sizeof(address);
+    if (::getsockname(socket, reinterpret_cast<sockaddr*>(&address), &length) != 0) return;
+    port = std::to_string(ntohs(address.sin_port));
+  }
+  ~SilentServer() {
+    if (socket >= 0) ::close(socket);
+  }
+#endif
 };
 
 static int Attempt(const SilentServer& server, bool force_relay) {

@@ -4,6 +4,8 @@
 #include <stdint.h>
 #if defined(_WIN32) && defined(MICDROP_RTC_EXPORTS)
 #define MDR_API __declspec(dllexport)
+#elif !defined(_WIN32) && defined(MICDROP_RTC_EXPORTS)
+#define MDR_API __attribute__((visibility("default")))
 #else
 #define MDR_API
 #endif

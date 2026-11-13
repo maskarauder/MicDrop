@@ -3,7 +3,15 @@
 #include "ice_gathering.h"
 #include "media_transport.h"
 #include "route_selection.h"
+#ifdef _WIN32
 #include "windows_certificate_verifier.h"
+#else
+#include "posix_certificate_verifier.h"
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <strings.h>
+#include <sys/socket.h>
+#endif
 #include "api/audio_codecs/audio_decoder_factory_template.h"
 #include "api/audio_codecs/audio_encoder_factory_template.h"
 #include "api/audio_codecs/opus/audio_decoder_opus.h"
@@ -20,7 +28,9 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
+#ifdef _WIN32
 #include "rtc_base/win32_socket_init.h"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -165,9 +175,11 @@ template<typename F> int Guard(char* error, size_t size, F&& operation) noexcept
 }  // namespace
 
 struct mdr_peer : webrtc::PeerConnectionObserver {
+#ifdef _WIN32
   // The native DLL must work without a Go/net caller initializing Winsock.
   // Declared first so socket initialization outlives all threads and peers.
   webrtc::WinsockInitializer winsock;
+#endif
   std::unique_ptr<webrtc::Thread> network, worker, signaling;
   webrtc::scoped_refptr<micdrop::AudioDevice> device;
   webrtc::scoped_refptr<MusicEncoderFactory> encoders;
@@ -204,7 +216,9 @@ struct mdr_peer : webrtc::PeerConnectionObserver {
   }
   void Start(const char* endpoint, const char* return_endpoint = "", bool renomination = false, bool continual = false) {
     continuous = continual;
+#ifdef _WIN32
     Check(winsock.error() == 0, "Windows sockets initialization failed");
+#endif
     static std::once_flag initialize;
     std::call_once(initialize, [] {
       webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
@@ -231,6 +245,32 @@ struct mdr_peer : webrtc::PeerConnectionObserver {
       factory = webrtc::CreatePeerConnectionFactory(network.get(), worker.get(), signaling.get(), device,
           encoder_factory, decoder_factory, nullptr, nullptr, nullptr, nullptr);
       Check(factory != nullptr, "WebRTC factory failed");
+#ifndef _WIN32
+      {
+        ifaddrs* interfaces = nullptr;
+        bool has_external_interface = false;
+        if (::getifaddrs(&interfaces) == 0 && interfaces) {
+          for (const ifaddrs* cur = interfaces; cur; cur = cur->ifa_next) {
+            if (!cur->ifa_addr) continue;
+            if ((cur->ifa_flags & IFF_UP) == 0 || (cur->ifa_flags & IFF_LOOPBACK) != 0) continue;
+            const int family = cur->ifa_addr->sa_family;
+            if (family == AF_INET || family == AF_INET6) {
+              has_external_interface = true;
+              break;
+            }
+          }
+          ::freeifaddrs(interfaces);
+        }
+        // Preserve WebRTC's default loopback ignore mask whenever any physical or
+        // virtual LAN interface is up, so LAN/remote offers never advertise 127.0.0.1.
+        // Fall back to loopback only on offline hosts/sandboxes with solely lo active.
+        if (!has_external_interface) {
+          webrtc::PeerConnectionFactoryInterface::Options factory_options;
+          factory_options.network_ignore_mask = 0;
+          factory->SetOptions(factory_options);
+        }
+      }
+#endif
       webrtc::PeerConnectionInterface::RTCConfiguration config;
       config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
       config.enable_ice_renomination = renomination;
@@ -238,7 +278,11 @@ struct mdr_peer : webrtc::PeerConnectionObserver {
                                                    : webrtc::PeerConnectionInterface::GATHER_ONCE;
       // LAN defaults have no discovery servers; remote mode explicitly configures ICE before an offer.
       webrtc::PeerConnectionDependencies dependencies(this);
+#ifdef _WIN32
       dependencies.tls_cert_verifier = std::make_unique<micdrop::WindowsCertificateVerifier>(tls_verification);
+#else
+      dependencies.tls_cert_verifier = std::make_unique<micdrop::PosixCertificateVerifier>(tls_verification);
+#endif
       auto result = factory->CreatePeerConnectionOrError(config, std::move(dependencies));
       Check(result.ok(), "WebRTC peer creation failed"); connection = result.MoveValue();
       const bool sending = micdrop::DesktopSource(source) || source == 4;
@@ -586,6 +630,18 @@ struct mdr_peer : webrtc::PeerConnectionObserver {
 };
 
 extern "C" {
+#if defined(__linux__)
+// WebRTC's CreatePeerConnectionFactory retains a fallback branch to its built-in
+// Linux ADM typing detector even though MicDrop always supplies micdrop::AudioDevice.
+// Satisfy those three unreachable symbols privately so libmicdrop_rtc.so has no
+// runtime libX11 dependency on Wayland-only or headless Linux hosts.
+__attribute__((visibility("hidden"))) void* XOpenDisplay(const char*) { return nullptr; }
+__attribute__((visibility("hidden"))) int XCloseDisplay(void*) { return 0; }
+__attribute__((visibility("hidden"))) int XQueryKeymap(void*, char keys[32]) {
+  if (keys) std::memset(keys, 0, 32);
+  return 0;
+}
+#endif
 uint32_t mdr_abi_version(void) { return 8; }
 int mdr_configure_ice(mdr_peer* peer, const mdr_ice_server* servers, size_t count,
     int force_relay, char* error, size_t size) {
@@ -635,8 +691,13 @@ int mdr_create_duplex_configured(int probe, const char* capture_endpoint, const 
   return Guard(error, size, [&] {
     Check(out && (continuous == 0 || continuous == 1) && (renomination == 0 || renomination == 1) && (probe == 0 || probe == 1) && capture_endpoint && std::strlen(capture_endpoint) <= 1023 &&
         return_endpoint && *return_endpoint && std::strlen(return_endpoint) <= 1023, "Invalid duplex configuration");
+#ifdef _WIN32
     Check(probe || _stricmp(capture_endpoint, return_endpoint) != 0,
         "Desktop capture cannot use the microphone return cable");
+#else
+    Check(probe || strcasecmp(capture_endpoint, return_endpoint) != 0,
+        "Desktop capture cannot use the microphone return cable");
+#endif
     auto peer = std::make_unique<mdr_peer>(probe ? 6 : 5);
     peer->Start(capture_endpoint, return_endpoint, renomination != 0, continuous != 0); *out = peer.release();
   });

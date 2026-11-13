@@ -21,13 +21,46 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	args := os.Args[1:]
-	if len(args) == 0 && strings.EqualFold(filepath.Base(os.Args[0]), "MicDrop.exe") {
-		args = []string{"desktop"}
-	}
+	args := defaultArgs(os.Args[0], os.Args[1:], runtime.GOOS)
 	code := runContext(ctx, args, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+func defaultArgs(arg0 string, args []string, goos string) []string {
+	base := filepath.Base(arg0)
+	if goos == "windows" {
+		if idx := strings.LastIndexAny(arg0, `/\`); idx >= 0 {
+			base = arg0[idx+1:]
+		}
+		if len(args) == 0 && strings.EqualFold(base, "MicDrop.exe") {
+			return []string{"desktop"}
+		}
+		return args
+	}
+	if goos == "darwin" && base == "MicDrop" {
+		filtered := args
+		if len(filtered) > 0 && strings.HasPrefix(filtered[0], "-psn_") {
+			filtered = filtered[1:]
+		}
+		if len(filtered) == 0 {
+			return []string{"desktop"}
+		}
+		if len(filtered) == 1 && filtered[0] == "--background" {
+			return []string{"desktop", "--background"}
+		}
+		return filtered
+	}
+	if goos == "linux" && (base == "MicDrop" || base == "micdrop-desktop") {
+		if len(args) == 0 {
+			return []string{"desktop"}
+		}
+		if len(args) == 1 && args[0] == "--background" {
+			return []string{"desktop", "--background"}
+		}
+		return args
+	}
+	return args
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -51,7 +84,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		}
 		return 0
 	case "desktop":
-		return runDesktop(args[1:], stderr)
+		return runDesktop(args[1:], stdout, stderr)
 	case "remote":
 		return runRemote(args[1:], stdout, stderr)
 	case "bridge-devices":
@@ -79,7 +112,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			NativeABI uint32 `json:"native_abi"`
 			Capture   bool   `json:"capture_implemented"`
 			Streaming bool   `json:"network_streaming_implemented"`
-		}{"m0-webrtc-lan", runtime.GOOS + "/" + runtime.GOARCH, media.ABIVersion(), windowsaudio.Available(), runtime.GOOS == "windows" && runtime.GOARCH == "amd64"})
+		}{"m0-webrtc-lan", runtime.GOOS + "/" + runtime.GOARCH, media.ABIVersion(), windowsaudio.Available(), streamingSupported()})
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -123,4 +156,10 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "Unknown command %q; use doctor, rtc-check, devices, bridge-devices, bridge-check, identity, capture, tone, or stream.\n", args[0])
 		return 2
 	}
+}
+
+func streamingSupported() bool {
+	return (runtime.GOOS == "windows" && runtime.GOARCH == "amd64") ||
+		(runtime.GOOS == "linux" && runtime.GOARCH == "amd64") ||
+		(runtime.GOOS == "darwin" && runtime.GOARCH == "arm64")
 }

@@ -12,12 +12,16 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/maskarauder/MicDrop/internal/phonecontrol"
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsStructureLayouts(t *testing.T) {
@@ -78,7 +82,9 @@ func TestWindowsDesktopControls(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("window startup timed out")
 	}
-	hwnd, _, _ := findWindow.Call(uintptr(unsafe.Pointer(wide(class))), 0)
+	classPtr := wide(class)
+	hwnd, _, _ := findWindow.Call(uintptr(unsafe.Pointer(classPtr)), 0)
+	runtime.KeepAlive(classPtr)
 	if hwnd == 0 {
 		t.Fatal("owned test window missing")
 	}
@@ -122,7 +128,7 @@ func TestWindowsDesktopControls(t *testing.T) {
 	if portStyle&0x800 == 0 {
 		t.Fatal("port must stay read-only while running")
 	}
-	if found := int32(send(child(idCapture), 0x158, ^uintptr(0), uintptr(unsafe.Pointer(wide("CABLE Input (test fixture)"))))); found != 2 {
+	if found := int32(sendText(child(idCapture), 0x158, ^uintptr(0), "CABLE Input (test fixture)")); found != 2 {
 		t.Fatal("owner drawing lost native combo strings/type-ahead", found)
 	}
 	send(hwnd, 0x111, uintptr(idPhones), 0)
@@ -380,4 +386,108 @@ func captureWindow(hwnd uintptr, directory, name string) error {
 	// alongside optional artifact uploads.
 	fmt.Printf("MICDROP_UI_PREVIEW %s %s\n", name, base64.StdEncoding.EncodeToString(encoded.Bytes()))
 	return nil
+}
+
+//go:noinline
+func growWinTestStack(depth int) byte {
+	var pad [4096]byte
+	pad[0] = byte(depth)
+	pad[len(pad)-1] = byte(depth >> 8)
+	if depth > 0 {
+		pad[1] = growWinTestStack(depth - 1)
+	}
+	return pad[0] ^ pad[1] ^ pad[len(pad)-1]
+}
+
+func TestWindowsSendPointerAndTextPreserveGCLifetime(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	const (
+		msgReadText = 0x8055
+		msgWriteBuf = 0x8056
+		hwndMessage = ^uintptr(2) // HWND_MESSAGE ((HWND)-3)
+	)
+
+	lstrlenW := kernel32.NewProc("lstrlenW")
+	var observedText string
+	var sink byte
+	wndProc := windows.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
+		switch message {
+		case msgReadText:
+			sink ^= growWinTestStack(48)
+			for i := 0; i < 64; i++ {
+				churn := make([]uint16, 128)
+				for j := range churn {
+					churn[j] = 0xDEAD
+				}
+				sink ^= byte(churn[0])
+			}
+			runtime.GC()
+			debug.FreeOSMemory()
+			runtime.GC()
+			n, _, _ := lstrlenW.Call(lparam)
+			units := make([]uint16, int(n)+1)
+			if n > 0 {
+				moveMemory.Call(uintptr(unsafe.Pointer(&units[0])), lparam, n*2)
+				runtime.KeepAlive(units)
+			}
+			observedText = windows.UTF16ToString(units)
+			return uintptr(len(observedText))
+		case msgWriteBuf:
+			sink ^= growWinTestStack(48)
+			runtime.GC()
+			debug.FreeOSMemory()
+			runtime.GC()
+			encoded := utf16.Encode([]rune("Returned item text after GC + stack growth\x00"))
+			count := min(len(encoded), int(wparam))
+			if count > 0 {
+				moveMemory.Call(lparam, uintptr(unsafe.Pointer(&encoded[0])), uintptr(count)*2)
+				runtime.KeepAlive(encoded)
+			}
+			return uintptr(len(encoded) - 1)
+		}
+		r, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
+		return r
+	})
+
+	var instance windows.Handle
+	if err := windows.GetModuleHandleEx(2, nil, &instance); err != nil {
+		t.Fatal(err)
+	}
+	className := wide(fmt.Sprintf("MicDrop.GC.Test.%d.%d", os.Getpid(), time.Now().UnixNano()))
+	wc := windowClass{Proc: wndProc, Instance: uintptr(instance), ClassName: className}
+	wc.Size = uint32(unsafe.Sizeof(wc))
+	atom, _, err := registerClass.Call(uintptr(unsafe.Pointer(&wc)))
+	runtime.KeepAlive(&wc)
+	if atom == 0 {
+		t.Fatalf("register test class: %v", err)
+	}
+	defer func() {
+		unregisterClass.Call(uintptr(unsafe.Pointer(className)), uintptr(instance))
+		runtime.KeepAlive(className)
+	}()
+
+	hwnd, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(className)), 0, 0, 0, 0, 0, hwndMessage, 0, uintptr(instance), 0)
+	runtime.KeepAlive(className)
+	if hwnd == 0 {
+		t.Fatalf("create message-only window: %v", err)
+	}
+	defer destroyWindow.Call(hwnd)
+
+	for i := 0; i < 40; i++ {
+		want := fmt.Sprintf("Dynamic audio endpoint #%d — CABLE Input (VB-Audio Virtual Cable)", i)
+		if gotLen := int(sendText(hwnd, msgReadText, 0, want)); gotLen != len(want) || observedText != want {
+			t.Fatalf("iter %d: sendText corrupted string during GC: got %q (len=%d), want %q", i, observedText, gotLen, want)
+		}
+
+		buf := make([]uint16, 64)
+		if n := int32(sendPointer(hwnd, msgWriteBuf, uintptr(len(buf)), &buf[0])); n <= 0 {
+			t.Fatalf("iter %d: sendPointer returned %d", i, n)
+		}
+		if got := windows.UTF16ToString(buf); got != "Returned item text after GC + stack growth" {
+			t.Fatalf("iter %d: sendPointer buffer mismatch: got %q", i, got)
+		}
+	}
+	runtime.KeepAlive(sink)
 }

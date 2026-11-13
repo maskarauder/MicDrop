@@ -3,33 +3,10 @@
 #include <wincrypt.h>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include "rtc_base/ssl_certificate.h"
+#include "tls_diagnostics.h"
 
 namespace micdrop {
-
-// Counts and a Windows error code only; never certificate names, URLs or DER.
-struct TLSVerificationSnapshot {
-  uint32_t checks = 0, failures = 0, last_error = 0;
-};
-
-class TLSVerificationDiagnostics {
- public:
-  bool Record(DWORD error) {
-    std::lock_guard lock(mutex_);
-    ++value_.checks;
-    if (error) ++value_.failures;
-    value_.last_error = error;
-    return error == ERROR_SUCCESS;
-  }
-  TLSVerificationSnapshot Snapshot() const {
-    std::lock_guard lock(mutex_);
-    return value_;
-  }
- private:
-  mutable std::mutex mutex_;
-  TLSVerificationSnapshot value_;
-};
 
 // WebRTC's built-in TURN/TLS anchors do not include every public CA. Use the
 // current Windows account's trust store when that validation needs a fallback.

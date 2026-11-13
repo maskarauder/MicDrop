@@ -1,7 +1,8 @@
 # Security and privacy design
 
-This guide describes the Windows, Android, and beta iPhone implementation.
-The desktop app uses durable paired identities for LAN and opt-in remote sessions.
+This guide describes the Windows, Linux, macOS, Android, and beta iPhone
+implementations. The desktop apps and CLI hosts use durable paired identities
+for LAN and opt-in remote sessions.
 Functional coverage and remaining device or physical-latency limits are summarized
 in the [roadmap](ROADMAP.md); those checks are not an independent
 security audit. The legacy development listener has a separate boundary,
@@ -68,11 +69,16 @@ Do not treat a local network, a displayed hostname, or successful connectivity a
 ## Pairing and session identity
 
 [Paired LAN playback](PAIRING.md) uses the persistent current-user DPAPI
-Windows P-256 key, a non-exportable AndroidKeyStore P-256 signing key on
-Android, and a Secure Enclave (or Keychain fallback) P-256 signing key
+P-256 host key on Windows, a persistent current-user AES-256-GCM keystore
+envelope (`os.UserConfigDir()/MicDrop`: `~/.config/MicDrop` on Linux,
+`~/Library/Application Support/MicDrop` on macOS, protected with `0700`
+directory modes, `0600` regular-file `O_NOFOLLOW`/UID checks, and `flock`
+exclusive locking—a current-user filesystem boundary rather than OS hardware
+key sealing) on Linux and macOS, a non-exportable AndroidKeyStore P-256 signing
+key on Android, and a Secure Enclave (or Keychain fallback) P-256 signing key
 (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, non-synchronizable) with
 NIOSSL mutual TLS 1.3 on iPhone. The `--paired` listener (also used by the
-desktop app) requires TLS 1.3 client proof, explicit local approval, and a
+desktop apps) requires TLS 1.3 client proof, explicit local approval, and a
 current grant on each HTTP request. A fresh per-stream credential is also
 bound to its client key. Grant/consumed-invitation receipts are protected and
 atomically replaced under an exclusive listener lock. Revocation is durable,
@@ -94,7 +100,7 @@ WebRTC protects media transport, but authenticated signaling and identity bindin
 
 ## Transport and remote operation
 
-Require DTLS-SRTP through the selected WebRTC implementation; do not add plaintext LAN mode. Authenticate local signaling using the verified pairing identity and TLS. Validate normal server certificates for remote HTTPS/WSS and TURN TLS (including Apple `SecTrust` platform trust evaluation on iPhone); no global “accept any certificate” switch.
+Require DTLS-SRTP through the selected WebRTC implementation; do not add plaintext LAN mode. Authenticate local signaling using the verified pairing identity and TLS. Validate normal server certificates for remote HTTPS/WSS and TURN TLS (Windows CryptoAPI, Apple `SecTrust` + `SecPolicyCreateSSL` honoring per-certificate Keychain trust settings on macOS and iPhone, Android system trust on Android, and BoringSSL `X509_STORE` with the system CA bundle on Linux); no global “accept any certificate” switch.
 
 Remote signaling must carry authenticated peer-bound negotiation. A relay forwards encrypted packets; it must not terminate or transcode the audio session. A compromised signaling service must not be able to substitute a media fingerprint without detection. Validate that property before calling the product end-to-end authenticated.
 
@@ -103,7 +109,7 @@ using distinct operator-provisioned route/role tokens, then forwards only bounde
 opaque bytes between opposite roles on the same route. Existing paired TLS runs
 inside that stream. Resource tokens are not media authorization; a stolen token
 may consume limited service resources but cannot replace an endpoint's paired
-identity. The service dials no client-supplied network destination. The Windows
+identity. The service dials no client-supplied network destination. The desktop
 remote host also binds its explicitly configured private LAN address/port with
 the same paired TLS and session owner. A TLS-only pinned reachability probe sends
 no offer or bearer credential. See [Advanced settings](ADVANCED_SETTINGS.md)

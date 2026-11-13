@@ -28,7 +28,7 @@ add_executable(ice_gathering_contract_test ice_gathering_contract_test.cc)
 target_compile_features(ice_gathering_contract_test PRIVATE cxx_std_20)
 add_test(NAME ice_gathering_contract COMMAND ice_gathering_contract_test)
 
-if(WIN32)
+if(WIN32 OR APPLE OR UNIX)
   add_executable(windows_capture_contract_test windows_capture_contract_test.cc)
   target_link_libraries(windows_capture_contract_test PRIVATE micdrop_windows_audio)
   add_test(NAME windows_capture_contract COMMAND windows_capture_contract_test)
