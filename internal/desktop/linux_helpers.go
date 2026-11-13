@@ -63,7 +63,13 @@ func formatLinuxDesktopExec(exePath string, args ...string) (string, error) {
 	var tokens []string
 	if strings.ContainsRune(exePath, '%') {
 		// GDesktopAppInfo checks argv[0] existence before expanding %% field codes.
-		tokens = append(tokens, "/usr/bin/env")
+		// Use /bin/sh rather than /usr/bin/env because POSIX/GNU env interprets an
+		// initial argument containing '=' as a variable assignment.
+		quotedScript, err := quoteDesktopExecArg(`exec "$@"`)
+		if err != nil {
+			return "", err
+		}
+		tokens = append(tokens, "/bin/sh", "-c", quotedScript, "sh")
 	}
 	tokens = append(tokens, quotedExe)
 	tokens = append(tokens, args...)

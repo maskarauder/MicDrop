@@ -4,6 +4,7 @@ package desktop
 
 import (
 	"errors"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -61,6 +62,7 @@ func themeVisualStyle(hwnd uintptr, highContrast bool) {
 	}
 	empty := wide("")
 	themeSetWindowTheme.Call(hwnd, uintptr(unsafe.Pointer(empty)), uintptr(unsafe.Pointer(empty)))
+	runtime.KeepAlive(empty)
 }
 
 func (u *desktopWindow) updateControlTheme() {
@@ -155,7 +157,10 @@ func (u *desktopWindow) themeText(dc uintptr, area rect, text string, color uint
 	gdi32.NewProc("SelectObject").Call(dc, u.font)
 	gdi32.NewProc("SetBkMode").Call(dc, 1) // TRANSPARENT: never embossed.
 	setTextColor.Call(dc, uintptr(color))
-	user32.NewProc("DrawTextW").Call(dc, uintptr(unsafe.Pointer(wide(text))), ^uintptr(0), uintptr(unsafe.Pointer(&area)), flags|4|0x20|0x8000)
+	wideText := wide(text)
+	user32.NewProc("DrawTextW").Call(dc, uintptr(unsafe.Pointer(wideText)), ^uintptr(0), uintptr(unsafe.Pointer(&area)), flags|4|0x20|0x8000)
+	runtime.KeepAlive(wideText)
+	runtime.KeepAlive(&area)
 }
 func themeItemText(hwnd uintptr, kind, index uint32) string {
 	if index == ^uint32(0) {
@@ -170,7 +175,7 @@ func themeItemText(hwnd uintptr, kind, index uint32) string {
 		return ""
 	}
 	buffer := make([]uint16, int(length)+1)
-	if int32(send(hwnd, textMessage, uintptr(index), uintptr(unsafe.Pointer(&buffer[0])))) < 0 {
+	if int32(sendPointer(hwnd, textMessage, uintptr(index), &buffer[0])) < 0 {
 		return ""
 	}
 	return windows.UTF16ToString(buffer)

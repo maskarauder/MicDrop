@@ -80,5 +80,6 @@ void md_ui_close_window_for_test(void);
 void md_test_configure_tray(int simulated_indicator, int host_override, const char* dbus_addr);
 void md_test_set_allow_modals(int allow);
 int md_test_live_modal_objects(void);
+void md_test_tray_cleanup_stats(int* out_live_objects, int* out_destroyed_while_alive);
 
 #endif

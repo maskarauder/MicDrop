@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/maskarauder/MicDrop/internal/phonecontrol"
 )
@@ -78,7 +77,7 @@ func (u *desktopWindow) renderConnections(state Snapshot) {
 			}
 			stateLabel := strings.TrimSuffix(connectionStateLabel(device.State), " (last reported)")
 			label := string(name) + " · " + stateLabel + " · " + device.Key[:min(8, len(device.Key))]
-			send(u.controls[idDeviceList].handle, 0x180, 0, uintptr(unsafe.Pointer(wide(label))))
+			sendText(u.controls[idDeviceList].handle, 0x180, 0, label)
 			if selected == device.Key {
 				selection = i
 			}
@@ -164,7 +163,7 @@ func (u *desktopWindow) phoneSettingsGroupChanged() {
 			}
 			e.indices = append(e.indices, i)
 			label := field.Label + ": " + phoneFieldValue(field)
-			send(u.controls[idPhoneSettingsList].handle, 0x180, 0, uintptr(unsafe.Pointer(wide(label))))
+			sendText(u.controls[idPhoneSettingsList].handle, 0x180, 0, label)
 			if field.Key == e.field {
 				selection = len(e.indices) - 1
 			}

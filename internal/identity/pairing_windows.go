@@ -5,6 +5,7 @@ package identity
 import (
 	"io"
 	"os"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -35,6 +36,8 @@ func replacePairing(from, to string) error {
 	}
 	// Same-volume replacement of an already flushed file; wait for disk writes.
 	ok, _, callErr := movePairing.Call(uintptr(unsafe.Pointer(f)), uintptr(unsafe.Pointer(t)), 1|8)
+	runtime.KeepAlive(f)
+	runtime.KeepAlive(t)
 	if ok == 0 {
 		return callErr
 	}

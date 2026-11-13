@@ -1587,3 +1587,97 @@ func TestLinuxDesktopDialogRepeatedOpenCloseFinalizesObjects(t *testing.T) {
 		})
 	}
 }
+
+func TestLinuxDesktopTrayCleanupDestroysMenuBeforeIndicator(t *testing.T) {
+	if !hasLinuxDisplay() {
+		t.Skip("Linux GUI test requires DISPLAY or WAYLAND_DISPLAY")
+	}
+	defer configureTrayForTest(false, -1, "")
+
+	uiDo := func(fn func()) {
+		done := make(chan struct{})
+		uiTestQueue <- func() {
+			fn()
+			close(done)
+		}
+		wakeTestQueue()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out dispatching onto GTK main thread")
+		}
+	}
+
+	dbusAddr := startPrivateDBusDaemon(t)
+	_ = startMockStatusNotifierWatcher(t, dbusAddr, true)
+	configureTrayForTest(true, -1, dbusAddr)
+
+	for cycle := 0; cycle < 5; cycle++ {
+		started := make(chan struct{}, 1)
+		finished := make(chan error, 1)
+		backend := Backend{
+			Run: func(ctx context.Context, _ Settings, _ <-chan Command, emit func(Event)) error {
+				emit(Event{Kind: "ready", Message: "LAN control ready"})
+				started <- struct{}{}
+				<-ctx.Done()
+				return nil
+			},
+			Devices: func() ([]AudioDevice, error) {
+				return []AudioDevice{{ID: "speaker", Name: "PipeWire Output (test)", Default: true}}, nil
+			},
+			RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+		}
+
+		dir := t.TempDir()
+		settings := Defaults()
+		settings.Notifications = false
+		if err := SaveSettings(dir, settings); err != nil {
+			t.Fatal(err)
+		}
+
+		linuxMainThread <- func() {
+			finished <- runWindow(backend, dir, true, false)
+		}
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("cycle %d: runWindow failed to start: %v", cycle, err)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("cycle %d: runWindow startup timed out", cycle)
+		}
+
+		var liveDuring int
+		uiDo(func() {
+			liveDuring, _ = trayCleanupStatsForTest()
+		})
+		if liveDuring != 2 {
+			t.Fatalf("cycle %d: expected 2 live tray GObjects (indicator + sunk GtkMenu) while running, got %d", cycle, liveDuring)
+		}
+
+		uiDo(func() { triggerControlForTest(idExit, 0) })
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("cycle %d: runWindow returned error: %v", cycle, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("cycle %d: runWindow did not finish cleanup", cycle)
+		}
+
+		var liveAfter int
+		var destroyedWhileAlive bool
+		done := make(chan struct{})
+		linuxMainThread <- func() {
+			liveAfter, destroyedWhileAlive = trayCleanupStatsForTest()
+			close(done)
+		}
+		<-done
+
+		if !destroyedWhileAlive {
+			t.Fatalf("cycle %d: tray GtkMenu finalized before gtk_widget_destroy ran", cycle)
+		}
+		if liveAfter != 0 {
+			t.Fatalf("cycle %d: leaked %d tray GObject(s) after md_app_cleanup", cycle, liveAfter)
+		}
+	}
+}

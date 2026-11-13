@@ -103,11 +103,13 @@ enum {
   MD_G_SIGNAL_MATCH_DATA = 16,
   MD_G_BUS_TYPE_SESSION = 2,
   MD_G_DBUS_CALL_FLAGS_NONE = 0,
-  MD_G_DBUS_CALL_FLAGS_NO_AUTO_START = 2,
+  MD_G_DBUS_CALL_FLAGS_NO_AUTO_START = 1,
   MD_G_DBUS_CONN_FLAGS_SESSION_CLIENT = 9,
   MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS = 0,
   MD_APP_INDICATOR_STATUS_ACTIVE = 1,
 };
+
+typedef void (*GDestroyNotify)(gpointer data);
 
 typedef struct {
   int loaded;
@@ -143,6 +145,8 @@ typedef struct {
                                                 guint32 detail, void* closure, gpointer func, gpointer data);
   void (*g_object_set)(gpointer object, const char* first_property_name, ...);
   void (*g_object_get)(gpointer object, const char* first_property_name, ...);
+  gpointer (*g_object_ref_sink)(gpointer object);
+  void (*g_object_set_data_full)(gpointer object, const char* key, gpointer data, GDestroyNotify destroy);
   void (*g_object_unref)(gpointer object);
   void (*g_object_weak_ref)(gpointer object, GWeakNotify notify, gpointer data);
 
@@ -417,6 +421,8 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(gobject, g_signal_handlers_disconnect_matched);
   LOAD_SYM(gobject, g_object_set);
   LOAD_SYM(gobject, g_object_get);
+  LOAD_SYM(gobject, g_object_ref_sink);
+  LOAD_SYM(gobject, g_object_set_data_full);
   LOAD_SYM(gobject, g_object_unref);
   LOAD_SYM(gobject, g_object_weak_ref);
 
@@ -663,6 +669,7 @@ typedef struct {
   void* root_scroll;
   void* fixed;
   void* indicator;
+  int indicator_is_real;
   int test_indicator_present;
   int tray_available;
   void* tray_menu;
@@ -684,6 +691,9 @@ static int gTestSimIndicator = 0;
 static int gTestHostOverride = -1;
 static char* gTestDBusAddr = NULL;
 static int gTestAllowModals = 0;
+static int gLiveTrayObjects = 0;
+static int gTrayMenuFinalized = 0;
+static int gTrayMenuDestroyedWhileAlive = 0;
 
 static char* mdDupStr(const char* s) {
   if (s == NULL) {
@@ -1209,51 +1219,95 @@ static void mdSubscribeSniSignals(void) {
       NULL);
 }
 
+static void mdOnTrayObjectFinalized(gpointer data, gpointer where_the_object_was) {
+  (void)where_the_object_was;
+  if ((intptr_t)data == 1) {
+    __atomic_store_n(&gTrayMenuFinalized, 1, __ATOMIC_SEQ_CST);
+  }
+  __atomic_sub_fetch(&gLiveTrayObjects, 1, __ATOMIC_SEQ_CST);
+}
+
+static void mdOnTrayMenuDestroy(void* widget, gpointer user_data) {
+  (void)widget;
+  (void)user_data;
+  if (__atomic_load_n(&gTrayMenuFinalized, __ATOMIC_SEQ_CST) == 0) {
+    __atomic_store_n(&gTrayMenuDestroyedWhileAlive, 1, __ATOMIC_SEQ_CST);
+  }
+}
+
+static void mdTrackTrayObject(void* obj, int is_menu) {
+  if (obj != NULL && gGtk.g_object_weak_ref != NULL) {
+    __atomic_add_fetch(&gLiveTrayObjects, 1, __ATOMIC_SEQ_CST);
+    gGtk.g_object_weak_ref(obj, mdOnTrayObjectFinalized, (gpointer)(intptr_t)is_menu);
+  }
+}
+
 static void mdSetupTray(void) {
   gApp.tray_available = 0;
+  gApp.indicator_is_real = 0;
   gApp.test_indicator_present = (!gApp.headless_test && gTestSimIndicator != 0) ? 1 : 0;
+  __atomic_store_n(&gTrayMenuFinalized, 0, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&gTrayMenuDestroyedWhileAlive, 0, __ATOMIC_SEQ_CST);
   if (gApp.headless_test) {
     return;
   }
+  void* ind = NULL;
+  int is_real = 0;
   if (gGtk.has_indicator_api) {
-    void* ind = gGtk.app_indicator_new("micdrop-host", "audio-input-microphone-symbolic",
-                                       MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
-    if (ind != NULL) {
+    ind = gGtk.app_indicator_new("micdrop-host", "audio-input-microphone-symbolic",
+                                 MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+    is_real = ind != NULL ? 1 : 0;
+  } else if (gApp.test_indicator_present) {
+    // Allocate a plain GObject to mirror AppIndicator's sole sunk ownership of GtkMenu in tests.
+    ind = gGtk.gtk_css_provider_new();
+  }
+  if (ind != NULL) {
+    mdTrackTrayObject(ind, 0);
+    if (is_real) {
       if (gGtk.app_indicator_set_title != NULL) {
         gGtk.app_indicator_set_title(ind, "MicDrop");
       }
       gGtk.app_indicator_set_status(ind, MD_APP_INDICATOR_STATUS_ACTIVE);
       gGtk.g_signal_connect_data(ind, "connection-changed", (GCallback)mdOnIndicatorConnectionChanged, NULL, NULL, 0);
-
-      void* menu = gGtk.gtk_menu_new();
-      void* header = gGtk.gtk_menu_item_new_with_label("MicDrop · Stopped");
-      gGtk.gtk_widget_set_sensitive(header, 0);
-      gGtk.gtk_menu_shell_append(menu, header);
-      gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
-
-      void* open_item = gGtk.gtk_menu_item_new_with_label("Open MicDrop");
-      gGtk.g_signal_connect_data(open_item, "activate", (GCallback)mdOnTrayOpen, NULL, NULL, 0);
-      gGtk.gtk_menu_shell_append(menu, open_item);
-
-      void* toggle_item = gGtk.gtk_menu_item_new_with_label("Start host");
-      gGtk.g_signal_connect_data(toggle_item, "activate", (GCallback)mdOnTrayToggle, NULL, NULL, 0);
-      gGtk.gtk_menu_shell_append(menu, toggle_item);
-
-      gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
-
-      void* quit_item = gGtk.gtk_menu_item_new_with_label("Quit MicDrop");
-      gGtk.g_signal_connect_data(quit_item, "activate", (GCallback)mdOnTrayQuit, NULL, NULL, 0);
-      gGtk.gtk_menu_shell_append(menu, quit_item);
-
-      gGtk.gtk_widget_show_all(menu);
-      gGtk.app_indicator_set_menu(ind, menu);
-
-      gApp.indicator = ind;
-      gApp.tray_menu = menu;
-      gApp.tray_header_item = header;
-      gApp.tray_toggle_item = toggle_item;
-      gApp.toggle_target_id = gApp.start_id;
     }
+
+    void* menu = gGtk.gtk_menu_new();
+    mdTrackTrayObject(menu, 1);
+    gGtk.g_signal_connect_data(menu, "destroy", (GCallback)mdOnTrayMenuDestroy, NULL, NULL, 0);
+
+    void* header = gGtk.gtk_menu_item_new_with_label("MicDrop · Stopped");
+    gGtk.gtk_widget_set_sensitive(header, 0);
+    gGtk.gtk_menu_shell_append(menu, header);
+    gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
+
+    void* open_item = gGtk.gtk_menu_item_new_with_label("Open MicDrop");
+    gGtk.g_signal_connect_data(open_item, "activate", (GCallback)mdOnTrayOpen, NULL, NULL, 0);
+    gGtk.gtk_menu_shell_append(menu, open_item);
+
+    void* toggle_item = gGtk.gtk_menu_item_new_with_label("Start host");
+    gGtk.g_signal_connect_data(toggle_item, "activate", (GCallback)mdOnTrayToggle, NULL, NULL, 0);
+    gGtk.gtk_menu_shell_append(menu, toggle_item);
+
+    gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
+
+    void* quit_item = gGtk.gtk_menu_item_new_with_label("Quit MicDrop");
+    gGtk.g_signal_connect_data(quit_item, "activate", (GCallback)mdOnTrayQuit, NULL, NULL, 0);
+    gGtk.gtk_menu_shell_append(menu, quit_item);
+
+    gGtk.gtk_widget_show_all(menu);
+    if (is_real) {
+      gGtk.app_indicator_set_menu(ind, menu);
+    } else {
+      gGtk.g_object_ref_sink(menu);
+      gGtk.g_object_set_data_full(ind, "md-sim-menu", menu, gGtk.g_object_unref);
+    }
+
+    gApp.indicator = ind;
+    gApp.indicator_is_real = is_real;
+    gApp.tray_menu = menu;
+    gApp.tray_header_item = header;
+    gApp.tray_toggle_item = toggle_item;
+    gApp.toggle_target_id = gApp.start_id;
   }
   if (gApp.indicator != NULL || gApp.test_indicator_present) {
     if (gTestHostOverride < 0 || gTestDBusAddr != NULL) {
@@ -1491,17 +1545,20 @@ void md_app_cleanup(void) {
     gApp.qr_surface = NULL;
     gApp.qr_size = 0;
   }
-  if (gApp.indicator != NULL) {
-    gGtk.g_signal_handlers_disconnect_matched(
-        gApp.indicator, MD_G_SIGNAL_MATCH_FUNC, 0, 0, NULL, (gpointer)mdOnIndicatorConnectionChanged, NULL);
-    gGtk.g_object_unref(gApp.indicator);
-    gApp.indicator = NULL;
-  }
   if (gApp.tray_menu != NULL) {
     gGtk.gtk_widget_destroy(gApp.tray_menu);
     gApp.tray_menu = NULL;
     gApp.tray_header_item = NULL;
     gApp.tray_toggle_item = NULL;
+  }
+  if (gApp.indicator != NULL) {
+    if (gApp.indicator_is_real) {
+      gGtk.g_signal_handlers_disconnect_matched(
+          gApp.indicator, MD_G_SIGNAL_MATCH_FUNC, 0, 0, NULL, (gpointer)mdOnIndicatorConnectionChanged, NULL);
+    }
+    gGtk.g_object_unref(gApp.indicator);
+    gApp.indicator = NULL;
+    gApp.indicator_is_real = 0;
   }
   if (gApp.dbus_conn != NULL) {
     if (gApp.sni_watcher_sub_id != 0) {
@@ -2097,7 +2154,9 @@ void md_ui_update_tray(const char* status, int running, int connected) {
   if (connected != 0) {
     icon_name = "audio-input-microphone";
   }
-  gGtk.app_indicator_set_icon_full(gApp.indicator, icon_name, label);
+  if (gApp.indicator_is_real && gGtk.app_indicator_set_icon_full != NULL) {
+    gGtk.app_indicator_set_icon_full(gApp.indicator, icon_name, label);
+  }
   if (gApp.tray_header_item != NULL) {
     gGtk.gtk_menu_item_set_label(gApp.tray_header_item, label);
   }
@@ -2434,6 +2493,18 @@ int md_test_live_modal_objects(void) {
     mdFlushEvents();
   }
   return __atomic_load_n(&gLiveModalObjects, __ATOMIC_SEQ_CST);
+}
+
+void md_test_tray_cleanup_stats(int* out_live_objects, int* out_destroyed_while_alive) {
+  if (gGtk.loaded && gApp.gtk_inited) {
+    mdFlushEvents();
+  }
+  if (out_live_objects != NULL) {
+    *out_live_objects = __atomic_load_n(&gLiveTrayObjects, __ATOMIC_SEQ_CST);
+  }
+  if (out_destroyed_while_alive != NULL) {
+    *out_destroyed_while_alive = __atomic_load_n(&gTrayMenuDestroyedWhileAlive, __ATOMIC_SEQ_CST);
+  }
 }
 
 #endif

@@ -149,7 +149,9 @@ func runWindow(backend Backend, directory string, background bool, className str
 		defer windows.CloseHandle(mutex)
 	}
 	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		hwnd, _, _ := findWindow.Call(uintptr(unsafe.Pointer(wide(className))), 0)
+		existingClass := wide(className)
+		hwnd, _, _ := findWindow.Call(uintptr(unsafe.Pointer(existingClass)), 0)
+		runtime.KeepAlive(existingClass)
 		if hwnd != 0 {
 			postMessage.Call(hwnd, wmShow, 0, 0)
 			setForeground.Call(hwnd)
@@ -173,16 +175,23 @@ func runWindow(backend Backend, directory string, background bool, className str
 	wc := windowClass{Proc: desktopWndProc, Instance: uintptr(instance), Icon: icon, SmallIcon: icon, Cursor: cursor, ClassName: wide(className)}
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	atom, _, callErr := registerClass.Call(uintptr(unsafe.Pointer(&wc)))
+	runtime.KeepAlive(&wc)
 	if atom == 0 {
 		return fmt.Errorf("register desktop window: %w", callErr)
 	}
-	defer unregisterClass.Call(uintptr(unsafe.Pointer(wc.ClassName)), uintptr(instance))
+	defer func() {
+		unregisterClass.Call(uintptr(unsafe.Pointer(wc.ClassName)), uintptr(instance))
+		runtime.KeepAlive(wc.ClassName)
+	}()
 	u := &desktopWindow{instance: uintptr(instance), icon: icon, backend: backend, controller: NewController(backend), settings: settings, directory: directory, controls: make(map[int]control), dpi: 96, jobs: make(chan uiResult, 1), closed: make(chan struct{}), labelID: 1000}
 	activeWindow = u
 	defer func() { activeWindow = nil; close(u.closed) }()
 	u.colors()
 	defer u.releaseGraphics()
-	hwnd, _, callErr := createWindow.Call(0x10000, uintptr(unsafe.Pointer(wc.ClassName)), uintptr(unsafe.Pointer(wide("MicDrop "+version.Current().Version))), 0xCF0000|0x02000000, 0x80000000, 0x80000000, 860, 700, 0, 0, uintptr(instance), 0)
+	windowTitle := wide("MicDrop " + version.Current().Version)
+	hwnd, _, callErr := createWindow.Call(0x10000, uintptr(unsafe.Pointer(wc.ClassName)), uintptr(unsafe.Pointer(windowTitle)), 0xCF0000|0x02000000, 0x80000000, 0x80000000, 860, 700, 0, 0, uintptr(instance), 0)
+	runtime.KeepAlive(wc.ClassName)
+	runtime.KeepAlive(windowTitle)
 	if hwnd == 0 {
 		return fmt.Errorf("create desktop window: %w", callErr)
 	}
@@ -197,7 +206,9 @@ func runWindow(backend Backend, directory string, background bool, className str
 	if err := u.build(); err != nil {
 		return err
 	}
-	message, _, _ := registerMessage.Call(uintptr(unsafe.Pointer(wide("TaskbarCreated"))))
+	taskbarMsg := wide("TaskbarCreated")
+	message, _, _ := registerMessage.Call(uintptr(unsafe.Pointer(taskbarMsg)))
+	runtime.KeepAlive(taskbarMsg)
 	u.taskbarMessage = uint32(message)
 	var work rect
 	systemParameters.Call(0x30, 0, uintptr(unsafe.Pointer(&work)), 0)
@@ -286,8 +297,10 @@ func (u *desktopWindow) colors() {
 }
 func (u *desktopWindow) fonts() {
 	old, oldTitle := u.font, u.titleFont
-	u.font, _, _ = createFont.Call(uintptr(-int32(u.scale(15))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(wide("Segoe UI"))))
-	u.titleFont, _, _ = createFont.Call(uintptr(-int32(u.scale(25))), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(wide("Segoe UI"))))
+	face := wide("Segoe UI")
+	u.font, _, _ = createFont.Call(uintptr(-int32(u.scale(15))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(face)))
+	u.titleFont, _, _ = createFont.Call(uintptr(-int32(u.scale(25))), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(face)))
+	runtime.KeepAlive(face)
 	for id, c := range u.controls {
 		font := u.font
 		if id == idTitle {
@@ -304,7 +317,10 @@ func (u *desktopWindow) fonts() {
 	}
 }
 func (u *desktopWindow) add(id int, class, title string, style uintptr, page, x, y, w, h int) error {
-	hwnd, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(wide(class))), uintptr(unsafe.Pointer(wide(title))), 0x40000000|0x10000000|style, 0, 0, 0, 0, u.hwnd, uintptr(id), u.instance, 0)
+	classPtr, titlePtr := wide(class), wide(title)
+	hwnd, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(classPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40000000|0x10000000|style, 0, 0, 0, 0, u.hwnd, uintptr(id), u.instance, 0)
+	runtime.KeepAlive(classPtr)
+	runtime.KeepAlive(titlePtr)
 	if hwnd == 0 {
 		return fmt.Errorf("create %s control: %w", class, err)
 	}
@@ -534,7 +550,7 @@ func (u *desktopWindow) refresh() {
 func comboItems(hwnd uintptr, labels []string, selected int) {
 	send(hwnd, 0x14B, 0, 0)
 	for _, label := range labels {
-		send(hwnd, 0x143, 0, uintptr(unsafe.Pointer(wide(label))))
+		sendText(hwnd, 0x143, 0, label)
 	}
 	if selected >= 0 {
 		send(hwnd, 0x14E, uintptr(selected), 0)
@@ -689,7 +705,7 @@ func (u *desktopWindow) tick() {
 			for i, phone := range state.Phones {
 				u.phoneKeys = append(u.phoneKeys, phone.Key)
 				label := phone.Name + "  ·  " + phone.Key[:min(12, len(phone.Key))]
-				send(u.controls[idPhoneList].handle, 0x180, 0, uintptr(unsafe.Pointer(wide(label))))
+				sendText(u.controls[idPhoneList].handle, 0x180, 0, label)
 				if phone.Key == selected {
 					send(u.controls[idPhoneList].handle, 0x186, uintptr(i), 0)
 				}
@@ -867,7 +883,11 @@ func (u *desktopWindow) action(id int) {
 	case idCableHelp:
 		if !u.modal {
 			u.modal = true
-			messageBox.Call(u.hwnd, uintptr(unsafe.Pointer(wide("Install a virtual audio cable separately, then restart Windows if its installer requests it.\r\n\r\nChoose its playback endpoint here (usually CABLE Input). In Discord or your recording app, choose its recording endpoint (usually CABLE Output). Keep Windows 'Listen to this device' off.\r\n\r\nDesktop playback works with microphone return disabled. MicDrop does not install or bundle a driver."))), uintptr(unsafe.Pointer(wide("Microphone return setup"))), 0x40)
+			helpText := wide("Install a virtual audio cable separately, then restart Windows if its installer requests it.\r\n\r\nChoose its playback endpoint here (usually CABLE Input). In Discord or your recording app, choose its recording endpoint (usually CABLE Output). Keep Windows 'Listen to this device' off.\r\n\r\nDesktop playback works with microphone return disabled. MicDrop does not install or bundle a driver.")
+			helpTitle := wide("Microphone return setup")
+			messageBox.Call(u.hwnd, uintptr(unsafe.Pointer(helpText)), uintptr(unsafe.Pointer(helpTitle)), 0x40)
+			runtime.KeepAlive(helpText)
+			runtime.KeepAlive(helpTitle)
 			u.modal = false
 		}
 	case idExit:
@@ -932,15 +952,21 @@ func (u *desktopWindow) trayMenu() {
 		return
 	}
 	defer destroyMenu.Call(menu)
-	appendMenu.Call(menu, 0, wmShow, uintptr(unsafe.Pointer(wide("Open MicDrop"))))
+	openLabel := wide("Open MicDrop")
+	appendMenu.Call(menu, 0, wmShow, uintptr(unsafe.Pointer(openLabel)))
+	runtime.KeepAlive(openLabel)
 	action := idStart
 	label := "Start host"
 	if u.controller.Snapshot().Phase != "stopped" {
 		action = idStop
 		label = "Stop host"
 	}
-	appendMenu.Call(menu, 0, uintptr(action), uintptr(unsafe.Pointer(wide(label))))
-	appendMenu.Call(menu, 0, uintptr(idExit), uintptr(unsafe.Pointer(wide("Exit"))))
+	actionLabel := wide(label)
+	appendMenu.Call(menu, 0, uintptr(action), uintptr(unsafe.Pointer(actionLabel)))
+	runtime.KeepAlive(actionLabel)
+	exitLabel := wide("Exit")
+	appendMenu.Call(menu, 0, uintptr(idExit), uintptr(unsafe.Pointer(exitLabel)))
+	runtime.KeepAlive(exitLabel)
 	var cursor point
 	getCursorPos.Call(uintptr(unsafe.Pointer(&cursor)))
 	setForeground.Call(u.hwnd)
@@ -959,7 +985,9 @@ func (u *desktopWindow) drawQR(item *drawItem) {
 		fillRect.Call(item.DC, uintptr(unsafe.Pointer(&item.Rect)), u.panelBrush)
 		setTextColor.Call(item.DC, uintptr(u.foreground))
 		setBackgroundColor.Call(item.DC, uintptr(u.panel))
-		user32.NewProc("DrawTextW").Call(item.DC, uintptr(unsafe.Pointer(wide("Pair a phone to show\r\nits private QR code."))), ^uintptr(0), uintptr(unsafe.Pointer(&item.Rect)), 1|4|0x10)
+		hint := wide("Pair a phone to show\r\nits private QR code.")
+		user32.NewProc("DrawTextW").Call(item.DC, uintptr(unsafe.Pointer(hint)), ^uintptr(0), uintptr(unsafe.Pointer(&item.Rect)), 1|4|0x10)
+		runtime.KeepAlive(hint)
 		return
 	}
 	white, _, _ := gdi32.NewProc("GetStockObject").Call(0)

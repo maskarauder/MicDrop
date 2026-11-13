@@ -39,6 +39,7 @@ var loadRTCDLL = sync.OnceValues(func() (*rtcDLL, error) {
 	// Resolve only beside this executable and in trusted system directories.
 	load := syscall.NewLazyDLL("kernel32.dll").NewProc("LoadLibraryExW")
 	handle, _, _ := load.Call(uintptr(unsafe.Pointer(wide)), 0, 0x100|0x1000)
+	runtime.KeepAlive(wide)
 	if handle == 0 {
 		return nil, fmt.Errorf("cannot load micdrop_rtc.dll beside the executable; extract the complete Windows artifact")
 	}
@@ -254,12 +255,40 @@ func (p *nativePeer) SetLocalSignaling(local bool) {
 	defer p.mu.Unlock()
 	p.localSignaling = local
 }
+
+type nativeICEServer struct {
+	url, username, credential *byte
+}
+
+type configureICECall func(handle uintptr, servers *nativeICEServer, count, force uintptr, message *byte, messageLen uintptr) uintptr
+
+func (p *nativePeer) callConfigureICE(handle uintptr, servers *nativeICEServer, count, force uintptr, message *byte, messageLen uintptr) uintptr {
+	result, _, _ := p.lib.configureICE.Call(
+		handle,
+		uintptr(unsafe.Pointer(servers)),
+		count,
+		force,
+		uintptr(unsafe.Pointer(message)),
+		messageLen,
+	)
+	runtime.KeepAlive(servers)
+	runtime.KeepAlive(message)
+	return result
+}
+
 func (p *nativePeer) applyICE(config ICEConfig) error {
-	type nativeServer struct{ url, username, credential *byte }
+	if err := applyICEWith(p.callConfigureICE, p.handle, config); err != nil {
+		return err
+	}
+	p.relayOnly = config.ForceRelay
+	return nil
+}
+
+func applyICEWith(call configureICECall, handle uintptr, config ICEConfig) error {
 	if len(config.Servers) > 8 {
 		return errors.New("too many ICE servers")
 	}
-	servers := make([]nativeServer, len(config.Servers))
+	servers := make([]nativeICEServer, len(config.Servers))
 	for i, s := range config.Servers {
 		values := []string{s.URL, s.Username, s.Credential}
 		dest := []**byte{&servers[i].url, &servers[i].username, &servers[i].credential}
@@ -274,21 +303,21 @@ func (p *nativePeer) applyICE(config ICEConfig) error {
 			*dest[j] = b
 		}
 	}
-	var pointer uintptr
+	var serversPtr *nativeICEServer
 	if len(servers) > 0 {
-		pointer = uintptr(unsafe.Pointer(&servers[0]))
+		serversPtr = &servers[0]
 	}
 	force := uintptr(0)
 	if config.ForceRelay {
 		force = 1
 	}
 	message := make([]byte, 512)
-	result, _, _ := p.lib.configureICE.Call(p.handle, pointer, uintptr(len(servers)), force, uintptr(unsafe.Pointer(&message[0])), uintptr(len(message)))
+	result := call(handle, serversPtr, uintptr(len(servers)), force, &message[0], uintptr(len(message)))
 	runtime.KeepAlive(servers)
+	runtime.KeepAlive(message)
 	if result != 0 {
 		return nativeError(message)
 	}
-	p.relayOnly = config.ForceRelay
 	return nil
 }
 func (p *nativePeer) Answer(sdp string) error {

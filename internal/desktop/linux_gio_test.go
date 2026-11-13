@@ -24,19 +24,32 @@ func TestLinuxDesktopEntriesLaunchViaGIO(t *testing.T) {
 		t.Skip("python3 binary not installed; skipping GIO .desktop launch check")
 	}
 
-	dirNames := []string{
-		`My Apps $HOME $1 "quoted" 'single' \ ` + "`backtick`",
-		`My Apps $1 "test" \ 100% %f ` + "`bin`",
+	cases := []struct {
+		subDir  string
+		exeName string
+	}{
+		{
+			subDir:  `My Apps $HOME $1 "quoted" 'single' \ ` + "`backtick`",
+			exeName: "micdrop-host",
+		},
+		{
+			subDir:  `My Apps $1 "test" \ 100% %f ` + "`bin`",
+			exeName: "micdrop-host",
+		},
+		{
+			subDir:  `dir=1 $HOME $1 "quoted" 'single' \ 100% %f ` + "`bin`",
+			exeName: "micdrop=host%1",
+		},
 	}
 
-	for idx, subDir := range dirNames {
+	for idx, tc := range cases {
 		t.Run(fmt.Sprintf("case_%d", idx), func(t *testing.T) {
 			root := t.TempDir()
-			binDir := filepath.Join(root, subDir)
+			binDir := filepath.Join(root, tc.subDir)
 			if err := os.MkdirAll(binDir, 0700); err != nil {
 				t.Fatalf("mkdir special dir: %v", err)
 			}
-			exePath := filepath.Join(binDir, "micdrop-host")
+			exePath := filepath.Join(binDir, tc.exeName)
 			outFile := filepath.Join(root, "argv.txt")
 
 			// Use an executable Python script so argv[0] and all arguments are captured

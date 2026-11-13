@@ -1234,3 +1234,9 @@ func dismissModalsForTest() {
 func liveModalObjectsForTest() int {
 	return int(C.md_test_live_modal_objects())
 }
+
+func trayCleanupStatsForTest() (liveObjects int, menuDestroyedWhileAlive bool) {
+	var live, destroyedAlive C.int
+	C.md_test_tray_cleanup_stats(&live, &destroyedAlive)
+	return int(live), destroyedAlive != 0
+}

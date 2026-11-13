@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unsafe"
@@ -114,6 +115,7 @@ func stopHosts(scope string) error {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	class, _ := windows.UTF16PtrFromString("MicDrop.Desktop." + user.User.Sid.String())
 	hwnd, _, _ := user32.NewProc("FindWindowW").Call(uintptr(unsafe.Pointer(class)), 0)
+	runtime.KeepAlive(class)
 	var guiPID uint32
 	user32.NewProc("GetWindowThreadProcessId").Call(hwnd, uintptr(unsafe.Pointer(&guiPID)))
 	for _, host := range hosts {
