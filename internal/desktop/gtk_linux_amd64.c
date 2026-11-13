@@ -26,6 +26,10 @@ typedef void* gpointer;
 typedef void (*GCallback)(void);
 typedef void (*GClosureNotify)(gpointer data, void* closure);
 typedef gboolean (*GSourceFunc)(gpointer user_data);
+typedef void (*GDBusSignalCallback)(void* connection, const char* sender_name,
+                                    const char* object_path, const char* interface_name,
+                                    const char* signal_name, void* parameters,
+                                    gpointer user_data);
 
 typedef struct _GError {
   guint32 domain;
@@ -94,9 +98,12 @@ enum {
   MD_CAIRO_FORMAT_ARGB32 = 0,
   MD_CAIRO_FILTER_NEAREST = 3,
   MD_G_TYPE_STRING = 64,
+  MD_G_SIGNAL_MATCH_FUNC = 8,
   MD_G_SIGNAL_MATCH_DATA = 16,
   MD_G_BUS_TYPE_SESSION = 2,
   MD_G_DBUS_CALL_FLAGS_NONE = 0,
+  MD_G_DBUS_CALL_FLAGS_NO_AUTO_START = 2,
+  MD_G_DBUS_CONN_FLAGS_SESSION_CLIENT = 9,
   MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS = 0,
   MD_APP_INDICATOR_STATUS_ACTIVE = 1,
 };
@@ -122,6 +129,11 @@ typedef struct {
   gboolean (*g_source_remove)(guint tag);
   char* (*g_filename_to_uri)(const char* filename, const char* hostname, GError** error);
   void* (*g_variant_new)(const char* format_string, ...);
+  void (*g_variant_unref)(void* value);
+  void (*g_variant_get)(void* value, const char* format_string, ...);
+  gboolean (*g_variant_get_boolean)(void* value);
+  gboolean (*g_variant_is_of_type)(void* value, const void* type);
+  const void* (*g_variant_type_checked_)(const char* type_string);
 
   // GObject
   gulong (*g_signal_connect_data)(gpointer instance, const char* detailed_signal, GCallback c_handler,
@@ -135,10 +147,23 @@ typedef struct {
   // GIO
   gboolean (*g_app_info_launch_default_for_uri)(const char* uri, void* context, GError** error);
   void* (*g_bus_get_sync)(int bus_type, void* cancellable, GError** error);
+  void* (*g_dbus_connection_new_for_address_sync)(const char* address, int flags, void* observer,
+                                                  void* cancellable, GError** error);
+  gboolean (*g_dbus_connection_close_sync)(void* connection, void* cancellable, GError** error);
   void (*g_dbus_connection_call)(void* connection, const char* bus_name, const char* object_path,
                                  const char* interface_name, const char* method_name, void* parameters,
                                  const void* reply_type, int flags, gint timeout_msec,
                                  void* cancellable, void* callback, gpointer user_data);
+  void* (*g_dbus_connection_call_sync)(void* connection, const char* bus_name, const char* object_path,
+                                       const char* interface_name, const char* method_name, void* parameters,
+                                       const void* reply_type, int flags, gint timeout_msec,
+                                       void* cancellable, GError** error);
+  guint (*g_dbus_connection_signal_subscribe)(void* connection, const char* sender,
+                                              const char* interface_name, const char* member,
+                                              const char* object_path, const char* arg0, int flags,
+                                              GDBusSignalCallback callback, gpointer user_data,
+                                              GClosureNotify user_data_free_func);
+  void (*g_dbus_connection_signal_unsubscribe)(void* connection, guint subscription_id);
 
   // Cairo
   void* (*cairo_image_surface_create)(int format, int width, int height);
@@ -311,10 +336,12 @@ typedef struct {
   void (*gtk_message_dialog_format_secondary_text)(void* message_dialog, const char* message_format, ...);
   void* (*gtk_dialog_add_button)(void* dialog, const char* button_text, gint response_id);
   void (*gtk_dialog_set_default_response)(void* dialog, gint response_id);
+  void (*gtk_dialog_response)(void* dialog, gint response_id);
   gint (*gtk_dialog_run)(void* dialog);
 
   void* (*gtk_file_chooser_native_new)(const char* title, void* parent, int action, const char* accept_label, const char* cancel_label);
   gint (*gtk_native_dialog_run)(void* self);
+  void (*gtk_native_dialog_hide)(void* self);
   void (*gtk_native_dialog_destroy)(void* self);
   void* (*gtk_file_filter_new)(void);
   void (*gtk_file_filter_set_name)(void* filter, const char* name);
@@ -378,6 +405,11 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(glib, g_source_remove);
   LOAD_SYM(glib, g_filename_to_uri);
   LOAD_SYM(glib, g_variant_new);
+  LOAD_SYM(glib, g_variant_unref);
+  LOAD_SYM(glib, g_variant_get);
+  LOAD_SYM(glib, g_variant_get_boolean);
+  LOAD_SYM(glib, g_variant_is_of_type);
+  LOAD_SYM(glib, g_variant_type_checked_);
 
   LOAD_SYM(gobject, g_signal_connect_data);
   LOAD_SYM(gobject, g_signal_handlers_disconnect_matched);
@@ -387,7 +419,12 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
 
   LOAD_SYM(gio, g_app_info_launch_default_for_uri);
   LOAD_SYM(gio, g_bus_get_sync);
+  LOAD_SYM(gio, g_dbus_connection_new_for_address_sync);
+  *(void**)(&gGtk.g_dbus_connection_close_sync) = dlsym(gGtk.gio, "g_dbus_connection_close_sync");
   LOAD_SYM(gio, g_dbus_connection_call);
+  LOAD_SYM(gio, g_dbus_connection_call_sync);
+  LOAD_SYM(gio, g_dbus_connection_signal_subscribe);
+  LOAD_SYM(gio, g_dbus_connection_signal_unsubscribe);
 
   LOAD_SYM(cairo, cairo_image_surface_create);
   LOAD_SYM(cairo, cairo_image_surface_get_data);
@@ -542,9 +579,11 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(gtk, gtk_message_dialog_format_secondary_text);
   LOAD_SYM(gtk, gtk_dialog_add_button);
   LOAD_SYM(gtk, gtk_dialog_set_default_response);
+  LOAD_SYM(gtk, gtk_dialog_response);
   LOAD_SYM(gtk, gtk_dialog_run);
   LOAD_SYM(gtk, gtk_file_chooser_native_new);
   LOAD_SYM(gtk, gtk_native_dialog_run);
+  LOAD_SYM(gtk, gtk_native_dialog_hide);
   LOAD_SYM(gtk, gtk_native_dialog_destroy);
   LOAD_SYM(gtk, gtk_file_filter_new);
   LOAD_SYM(gtk, gtk_file_filter_set_name);
@@ -607,6 +646,7 @@ typedef struct {
   int css_installed;
   int high_contrast;
   int headless_test;
+  int allow_modals_in_test;
   int loop_running;
   int quit_requested;
   pthread_t main_thread;
@@ -620,16 +660,27 @@ typedef struct {
   void* root_scroll;
   void* fixed;
   void* indicator;
+  int test_indicator_present;
+  int tray_available;
   void* tray_menu;
   void* tray_header_item;
   void* tray_toggle_item;
   void* dbus_conn;
+  int dbus_conn_private;
+  guint sni_watcher_sub_id;
+  guint sni_owner_sub_id;
+  void* active_dialog;
+  void* active_native_dialog;
   void* qr_surface;
   int qr_size;
   MdControlEntry* controls;
 } MdAppState;
 
 static MdAppState gApp;
+static int gTestSimIndicator = 0;
+static int gTestHostOverride = -1;
+static char* gTestDBusAddr = NULL;
+static int gTestAllowModals = 0;
 
 static char* mdDupStr(const char* s) {
   if (s == NULL) {
@@ -854,13 +905,16 @@ static void mdOnSizeAllocate(void* widget, GtkAllocation* allocation, gpointer u
   md_ui_layout();
 }
 
+static void mdRefreshTrayAvailability(void);
+
 static gboolean mdOnWindowDelete(void* widget, void* event, gpointer user_data) {
   (void)event;
   (void)user_data;
   if (!mdIsActiveMainThread()) {
     return 1;
   }
-  if (gApp.indicator != NULL) {
+  mdRefreshTrayAvailability();
+  if (md_app_has_tray()) {
     gGtk.gtk_widget_hide(widget);
     return 1;
   }
@@ -1008,48 +1062,202 @@ static void mdRemoveClass(void* widget, const char* cls) {
   }
 }
 
+static void* mdEnsureDBus(void) {
+  if (gApp.dbus_conn != NULL) {
+    return gApp.dbus_conn;
+  }
+  GError* err = NULL;
+  if (gTestDBusAddr != NULL && gTestDBusAddr[0] != '\0') {
+    gApp.dbus_conn = gGtk.g_dbus_connection_new_for_address_sync(
+        gTestDBusAddr, MD_G_DBUS_CONN_FLAGS_SESSION_CLIENT, NULL, NULL, &err);
+    gApp.dbus_conn_private = gApp.dbus_conn != NULL ? 1 : 0;
+  } else {
+    gApp.dbus_conn = gGtk.g_bus_get_sync(MD_G_BUS_TYPE_SESSION, NULL, &err);
+    gApp.dbus_conn_private = 0;
+  }
+  if (err != NULL) {
+    gGtk.g_error_free(err);
+  }
+  return gApp.dbus_conn;
+}
+
+static int mdQueryStatusNotifierHost(void) {
+  void* conn = mdEnsureDBus();
+  if (conn == NULL) {
+    return 0;
+  }
+  void* params = gGtk.g_variant_new("(ss)", "org.kde.StatusNotifierWatcher", "IsStatusNotifierHostRegistered");
+  if (params == NULL) {
+    return 0;
+  }
+  GError* err = NULL;
+  void* reply = gGtk.g_dbus_connection_call_sync(
+      conn,
+      "org.kde.StatusNotifierWatcher",
+      "/StatusNotifierWatcher",
+      "org.freedesktop.DBus.Properties",
+      "Get",
+      params,
+      gGtk.g_variant_type_checked_("(v)"),
+      MD_G_DBUS_CALL_FLAGS_NO_AUTO_START,
+      250,
+      NULL,
+      &err);
+  if (err != NULL) {
+    gGtk.g_error_free(err);
+  }
+  if (reply == NULL) {
+    return 0;
+  }
+  void* inner = NULL;
+  gGtk.g_variant_get(reply, "(v)", &inner);
+  int registered = 0;
+  if (inner != NULL) {
+    if (gGtk.g_variant_is_of_type(inner, gGtk.g_variant_type_checked_("b"))) {
+      registered = gGtk.g_variant_get_boolean(inner) ? 1 : 0;
+    }
+    gGtk.g_variant_unref(inner);
+  }
+  gGtk.g_variant_unref(reply);
+  return registered;
+}
+
+static void mdApplyTrayAvailability(int available) {
+  int prev = gApp.tray_available;
+  int next = available != 0 ? 1 : 0;
+  gApp.tray_available = next;
+  if (prev != 0 && next == 0 && !gApp.headless_test && !gApp.quit_requested &&
+      gApp.window != NULL && !gGtk.gtk_widget_get_visible(gApp.window)) {
+    md_app_minimize_window();
+  }
+}
+
+static void mdRefreshTrayAvailability(void) {
+  if (gApp.indicator == NULL && !gApp.test_indicator_present) {
+    mdApplyTrayAvailability(0);
+    return;
+  }
+  if (gTestHostOverride >= 0) {
+    mdApplyTrayAvailability(gTestHostOverride);
+    return;
+  }
+  mdApplyTrayAvailability(mdQueryStatusNotifierHost());
+}
+
+static void mdOnSniSignal(void* connection, const char* sender_name,
+                          const char* object_path, const char* interface_name,
+                          const char* signal_name, void* parameters,
+                          gpointer user_data) {
+  (void)connection;
+  (void)sender_name;
+  (void)object_path;
+  (void)interface_name;
+  (void)signal_name;
+  (void)parameters;
+  (void)user_data;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
+  mdRefreshTrayAvailability();
+}
+
+static void mdOnIndicatorConnectionChanged(void* indicator, gboolean connected, gpointer user_data) {
+  (void)indicator;
+  (void)user_data;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
+  if (!connected && gTestHostOverride < 0) {
+    mdApplyTrayAvailability(0);
+    return;
+  }
+  mdRefreshTrayAvailability();
+}
+
+static void mdSubscribeSniSignals(void) {
+  if (gApp.sni_watcher_sub_id != 0 || gApp.sni_owner_sub_id != 0) {
+    return;
+  }
+  void* conn = mdEnsureDBus();
+  if (conn == NULL) {
+    return;
+  }
+  gApp.sni_watcher_sub_id = gGtk.g_dbus_connection_signal_subscribe(
+      conn,
+      "org.kde.StatusNotifierWatcher",
+      NULL,
+      NULL,
+      "/StatusNotifierWatcher",
+      NULL,
+      0,
+      mdOnSniSignal,
+      NULL,
+      NULL);
+  gApp.sni_owner_sub_id = gGtk.g_dbus_connection_signal_subscribe(
+      conn,
+      "org.freedesktop.DBus",
+      "org.freedesktop.DBus",
+      "NameOwnerChanged",
+      "/org/freedesktop/DBus",
+      "org.kde.StatusNotifierWatcher",
+      0,
+      mdOnSniSignal,
+      NULL,
+      NULL);
+}
+
 static void mdSetupTray(void) {
-  if (gApp.headless_test || !gGtk.has_indicator_api) {
+  gApp.tray_available = 0;
+  gApp.test_indicator_present = (!gApp.headless_test && gTestSimIndicator != 0) ? 1 : 0;
+  if (gApp.headless_test) {
     return;
   }
-  void* ind = gGtk.app_indicator_new("micdrop-host", "audio-input-microphone-symbolic",
-                                     MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
-  if (ind == NULL) {
-    return;
+  if (gGtk.has_indicator_api) {
+    void* ind = gGtk.app_indicator_new("micdrop-host", "audio-input-microphone-symbolic",
+                                       MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+    if (ind != NULL) {
+      if (gGtk.app_indicator_set_title != NULL) {
+        gGtk.app_indicator_set_title(ind, "MicDrop");
+      }
+      gGtk.app_indicator_set_status(ind, MD_APP_INDICATOR_STATUS_ACTIVE);
+      gGtk.g_signal_connect_data(ind, "connection-changed", (GCallback)mdOnIndicatorConnectionChanged, NULL, NULL, 0);
+
+      void* menu = gGtk.gtk_menu_new();
+      void* header = gGtk.gtk_menu_item_new_with_label("MicDrop · Stopped");
+      gGtk.gtk_widget_set_sensitive(header, 0);
+      gGtk.gtk_menu_shell_append(menu, header);
+      gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
+
+      void* open_item = gGtk.gtk_menu_item_new_with_label("Open MicDrop");
+      gGtk.g_signal_connect_data(open_item, "activate", (GCallback)mdOnTrayOpen, NULL, NULL, 0);
+      gGtk.gtk_menu_shell_append(menu, open_item);
+
+      void* toggle_item = gGtk.gtk_menu_item_new_with_label("Start host");
+      gGtk.g_signal_connect_data(toggle_item, "activate", (GCallback)mdOnTrayToggle, NULL, NULL, 0);
+      gGtk.gtk_menu_shell_append(menu, toggle_item);
+
+      gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
+
+      void* quit_item = gGtk.gtk_menu_item_new_with_label("Quit MicDrop");
+      gGtk.g_signal_connect_data(quit_item, "activate", (GCallback)mdOnTrayQuit, NULL, NULL, 0);
+      gGtk.gtk_menu_shell_append(menu, quit_item);
+
+      gGtk.gtk_widget_show_all(menu);
+      gGtk.app_indicator_set_menu(ind, menu);
+
+      gApp.indicator = ind;
+      gApp.tray_menu = menu;
+      gApp.tray_header_item = header;
+      gApp.tray_toggle_item = toggle_item;
+      gApp.toggle_target_id = gApp.start_id;
+    }
   }
-  if (gGtk.app_indicator_set_title != NULL) {
-    gGtk.app_indicator_set_title(ind, "MicDrop");
+  if (gApp.indicator != NULL || gApp.test_indicator_present) {
+    if (gTestHostOverride < 0 || gTestDBusAddr != NULL) {
+      mdSubscribeSniSignals();
+    }
+    mdRefreshTrayAvailability();
   }
-  gGtk.app_indicator_set_status(ind, MD_APP_INDICATOR_STATUS_ACTIVE);
-
-  void* menu = gGtk.gtk_menu_new();
-  void* header = gGtk.gtk_menu_item_new_with_label("MicDrop · Stopped");
-  gGtk.gtk_widget_set_sensitive(header, 0);
-  gGtk.gtk_menu_shell_append(menu, header);
-  gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
-
-  void* open_item = gGtk.gtk_menu_item_new_with_label("Open MicDrop");
-  gGtk.g_signal_connect_data(open_item, "activate", (GCallback)mdOnTrayOpen, NULL, NULL, 0);
-  gGtk.gtk_menu_shell_append(menu, open_item);
-
-  void* toggle_item = gGtk.gtk_menu_item_new_with_label("Start host");
-  gGtk.g_signal_connect_data(toggle_item, "activate", (GCallback)mdOnTrayToggle, NULL, NULL, 0);
-  gGtk.gtk_menu_shell_append(menu, toggle_item);
-
-  gGtk.gtk_menu_shell_append(menu, gGtk.gtk_separator_menu_item_new());
-
-  void* quit_item = gGtk.gtk_menu_item_new_with_label("Quit MicDrop");
-  gGtk.g_signal_connect_data(quit_item, "activate", (GCallback)mdOnTrayQuit, NULL, NULL, 0);
-  gGtk.gtk_menu_shell_append(menu, quit_item);
-
-  gGtk.gtk_widget_show_all(menu);
-  gGtk.app_indicator_set_menu(ind, menu);
-
-  gApp.indicator = ind;
-  gApp.tray_menu = menu;
-  gApp.tray_header_item = header;
-  gApp.tray_toggle_item = toggle_item;
-  gApp.toggle_target_id = gApp.start_id;
 }
 
 int md_app_init(const char* window_title, int headless_test, int start_id, int stop_id, int exit_id, char* err_buf, size_t err_cap) {
@@ -1087,11 +1295,14 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
   uintptr_t gen = __atomic_add_fetch(&gApp.generation, 1, __ATOMIC_SEQ_CST);
   gApp.quit_requested = 0;
   gApp.loop_running = 0;
+  gApp.active_dialog = NULL;
+  gApp.active_native_dialog = NULL;
 
   gApp.high_contrast = mdDetectHighContrast();
   mdInstallCss(gApp.high_contrast);
 
   gApp.headless_test = headless_test != 0;
+  gApp.allow_modals_in_test = gTestAllowModals != 0;
   gApp.start_id = start_id;
   gApp.stop_id = stop_id;
   gApp.exit_id = exit_id;
@@ -1138,7 +1349,7 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
 }
 
 int md_app_has_tray(void) {
-  return gApp.indicator != NULL ? 1 : 0;
+  return ((gApp.indicator != NULL || gApp.test_indicator_present != 0) && gApp.tray_available != 0) ? 1 : 0;
 }
 
 static void mdFlushEvents(void) {
@@ -1248,8 +1459,13 @@ void md_app_cleanup(void) {
   if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
     return;
   }
-  __atomic_store_n(&gApp.initialized, 0, __ATOMIC_RELEASE);
   gApp.quit_requested = 1;
+  md_ui_dismiss_modals();
+  __atomic_store_n(&gApp.initialized, 0, __ATOMIC_RELEASE);
+  gApp.tray_available = 0;
+  gApp.test_indicator_present = 0;
+  gApp.active_dialog = NULL;
+  gApp.active_native_dialog = NULL;
   if (gApp.timer_id != 0) {
     gGtk.g_source_remove(gApp.timer_id);
     gApp.timer_id = 0;
@@ -1273,6 +1489,8 @@ void md_app_cleanup(void) {
     gApp.qr_size = 0;
   }
   if (gApp.indicator != NULL) {
+    gGtk.g_signal_handlers_disconnect_matched(
+        gApp.indicator, MD_G_SIGNAL_MATCH_FUNC, 0, 0, NULL, (gpointer)mdOnIndicatorConnectionChanged, NULL);
     gGtk.g_object_unref(gApp.indicator);
     gApp.indicator = NULL;
   }
@@ -1283,8 +1501,20 @@ void md_app_cleanup(void) {
     gApp.tray_toggle_item = NULL;
   }
   if (gApp.dbus_conn != NULL) {
+    if (gApp.sni_watcher_sub_id != 0) {
+      gGtk.g_dbus_connection_signal_unsubscribe(gApp.dbus_conn, gApp.sni_watcher_sub_id);
+      gApp.sni_watcher_sub_id = 0;
+    }
+    if (gApp.sni_owner_sub_id != 0) {
+      gGtk.g_dbus_connection_signal_unsubscribe(gApp.dbus_conn, gApp.sni_owner_sub_id);
+      gApp.sni_owner_sub_id = 0;
+    }
+    if (gApp.dbus_conn_private && gGtk.g_dbus_connection_close_sync != NULL) {
+      gGtk.g_dbus_connection_close_sync(gApp.dbus_conn, NULL, NULL);
+    }
     gGtk.g_object_unref(gApp.dbus_conn);
     gApp.dbus_conn = NULL;
+    gApp.dbus_conn_private = 0;
   }
   if (gApp.window != NULL) {
     gGtk.gtk_widget_destroy(gApp.window);
@@ -1884,14 +2114,8 @@ void md_ui_notify(const char* title, const char* body, int warning) {
   if (!gApp.initialized || gApp.headless_test) {
     return;
   }
-  if (gApp.dbus_conn == NULL) {
-    GError* err = NULL;
-    gApp.dbus_conn = gGtk.g_bus_get_sync(MD_G_BUS_TYPE_SESSION, NULL, &err);
-    if (err != NULL) {
-      gGtk.g_error_free(err);
-    }
-  }
-  if (gApp.dbus_conn == NULL) {
+  void* conn = mdEnsureDBus();
+  if (conn == NULL) {
     return;
   }
   void* params = gGtk.g_variant_new("(susssasa{sv}i)",
@@ -1906,7 +2130,7 @@ void md_ui_notify(const char* title, const char* body, int warning) {
   if (params == NULL) {
     return;
   }
-  gGtk.g_dbus_connection_call(gApp.dbus_conn,
+  gGtk.g_dbus_connection_call(conn,
                               "org.freedesktop.Notifications",
                               "/org/freedesktop/Notifications",
                               "org.freedesktop.Notifications",
@@ -1920,8 +2144,35 @@ void md_ui_notify(const char* title, const char* body, int warning) {
                               NULL);
 }
 
+void md_ui_dismiss_modals(void) {
+  if (!gGtk.loaded || !gApp.gtk_inited || !mdIsActiveMainThread()) {
+    return;
+  }
+  if (gApp.active_dialog != NULL) {
+    void* dlg = gApp.active_dialog;
+    gApp.active_dialog = NULL;
+    gGtk.gtk_dialog_response(dlg, MD_GTK_RESPONSE_CANCEL);
+  }
+  if (gApp.active_native_dialog != NULL) {
+    void* chooser = gApp.active_native_dialog;
+    gApp.active_native_dialog = NULL;
+    gGtk.gtk_native_dialog_hide(chooser);
+  }
+}
+
+int md_ui_has_active_modal(void) {
+  return (gApp.active_dialog != NULL || gApp.active_native_dialog != NULL) ? 1 : 0;
+}
+
+static int mdCanRunModal(void) {
+  return !(gApp.headless_test && !gApp.allow_modals_in_test) &&
+         gGtk.loaded && gApp.gtk_inited &&
+         __atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) != 0 &&
+         !gApp.quit_requested;
+}
+
 void md_ui_show_error(const char* message) {
-  if (gApp.headless_test || !gGtk.loaded || !gApp.gtk_inited) {
+  if (!mdCanRunModal()) {
     return;
   }
   void* dlg = gGtk.gtk_message_dialog_new(gApp.window, 1, MD_GTK_MESSAGE_WARNING, MD_GTK_BUTTONS_OK, "%s", "MicDrop");
@@ -1929,12 +2180,17 @@ void md_ui_show_error(const char* message) {
     return;
   }
   gGtk.gtk_message_dialog_format_secondary_text(dlg, "%s", message != NULL ? message : "");
+  void* prev = gApp.active_dialog;
+  gApp.active_dialog = dlg;
   gGtk.gtk_dialog_run(dlg);
+  if (gApp.active_dialog == dlg) {
+    gApp.active_dialog = prev;
+  }
   gGtk.gtk_widget_destroy(dlg);
 }
 
 void md_ui_show_info(const char* title, const char* message) {
-  if (gApp.headless_test || !gGtk.loaded || !gApp.gtk_inited) {
+  if (!mdCanRunModal()) {
     return;
   }
   void* dlg = gGtk.gtk_message_dialog_new(gApp.window, 1, MD_GTK_MESSAGE_INFO, MD_GTK_BUTTONS_OK, "%s",
@@ -1943,12 +2199,17 @@ void md_ui_show_info(const char* title, const char* message) {
     return;
   }
   gGtk.gtk_message_dialog_format_secondary_text(dlg, "%s", message != NULL ? message : "");
+  void* prev = gApp.active_dialog;
+  gApp.active_dialog = dlg;
   gGtk.gtk_dialog_run(dlg);
+  if (gApp.active_dialog == dlg) {
+    gApp.active_dialog = prev;
+  }
   gGtk.gtk_widget_destroy(dlg);
 }
 
 int md_ui_confirm(const char* message) {
-  if (gApp.headless_test || !gGtk.loaded || !gApp.gtk_inited) {
+  if (!mdCanRunModal()) {
     return 0;
   }
   void* dlg = gGtk.gtk_message_dialog_new(gApp.window, 1, MD_GTK_MESSAGE_QUESTION, MD_GTK_BUTTONS_NONE, "%s", "MicDrop");
@@ -1959,13 +2220,18 @@ int md_ui_confirm(const char* message) {
   gGtk.gtk_dialog_add_button(dlg, "Cancel", MD_GTK_RESPONSE_CANCEL);
   gGtk.gtk_dialog_add_button(dlg, "Confirm", MD_GTK_RESPONSE_ACCEPT);
   gGtk.gtk_dialog_set_default_response(dlg, MD_GTK_RESPONSE_CANCEL);
+  void* prev = gApp.active_dialog;
+  gApp.active_dialog = dlg;
   int resp = gGtk.gtk_dialog_run(dlg);
+  if (gApp.active_dialog == dlg) {
+    gApp.active_dialog = prev;
+  }
   gGtk.gtk_widget_destroy(dlg);
-  return resp == MD_GTK_RESPONSE_ACCEPT ? 1 : 0;
+  return (resp == MD_GTK_RESPONSE_ACCEPT && !gApp.quit_requested) ? 1 : 0;
 }
 
 char* md_ui_choose_json_file(void) {
-  if (gApp.headless_test || !gGtk.loaded || !gApp.gtk_inited) {
+  if (!mdCanRunModal()) {
     return NULL;
   }
   void* chooser = gGtk.gtk_file_chooser_native_new("Import private MicDrop remote configuration",
@@ -1983,8 +2249,14 @@ char* md_ui_choose_json_file(void) {
     gGtk.gtk_file_filter_add_mime_type(filter, "application/json");
     gGtk.gtk_file_chooser_add_filter(chooser, filter);
   }
+  void* prev = gApp.active_native_dialog;
+  gApp.active_native_dialog = chooser;
+  int resp = gGtk.gtk_native_dialog_run(chooser);
+  if (gApp.active_native_dialog == chooser) {
+    gApp.active_native_dialog = prev;
+  }
   char* out = NULL;
-  if (gGtk.gtk_native_dialog_run(chooser) == MD_GTK_RESPONSE_ACCEPT) {
+  if (resp == MD_GTK_RESPONSE_ACCEPT && !gApp.quit_requested) {
     char* path = gGtk.gtk_file_chooser_get_filename(chooser);
     if (path != NULL) {
       out = mdDupStr(path);
@@ -2099,6 +2371,38 @@ void md_ui_trigger(int id, int event_kind) {
     e->suppress_events = 0;
   }
   goMicDropEvent(id, event_kind);
+}
+
+int md_ui_window_visible_for_test(void) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.window == NULL) {
+    return 0;
+  }
+  return gGtk.gtk_widget_get_visible(gApp.window) ? 1 : 0;
+}
+
+void md_ui_close_window_for_test(void) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.window == NULL) {
+    return;
+  }
+  mdOnWindowDelete(gApp.window, NULL, NULL);
+}
+
+void md_test_configure_tray(int simulated_indicator, int host_override, const char* dbus_addr) {
+  gTestSimIndicator = simulated_indicator != 0 ? 1 : 0;
+  gTestHostOverride = host_override;
+  free(gTestDBusAddr);
+  gTestDBusAddr = (dbus_addr != NULL && dbus_addr[0] != '\0') ? mdDupStr(dbus_addr) : NULL;
+  if (mdIsActiveMainThread()) {
+    gApp.test_indicator_present = (!gApp.headless_test && gTestSimIndicator != 0) ? 1 : 0;
+    mdRefreshTrayAvailability();
+  }
+}
+
+void md_test_set_allow_modals(int allow) {
+  gTestAllowModals = allow != 0 ? 1 : 0;
+  if (__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
+    gApp.allow_modals_in_test = gTestAllowModals;
+  }
 }
 
 #endif

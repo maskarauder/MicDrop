@@ -423,6 +423,9 @@ static void mdPostStopLoop(void) {
 
 - (void)handleQuit:(id)sender {
   (void)sender;
+  if ([NSApp modalWindow] != nil) {
+    [NSApp abortModal];
+  }
   goMicDropEvent(self.exitControlID, MD_EVENT_CLICK);
 }
 

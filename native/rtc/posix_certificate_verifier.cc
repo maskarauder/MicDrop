@@ -109,6 +109,12 @@ uint32_t VerifyServerChainMacOS(
                : kErrorInvalidData;
   }
 
+  // Never allow synchronous AIA or revocation network downloads on WebRTC's
+  // network thread; missing intermediates must be supplied by the peer handshake.
+  if (SecTrustSetNetworkFetchAllowed(trust.ref, false) != errSecSuccess) {
+    return kErrorTrustStoreUnavailable;
+  }
+
   // In production (exclusive_roots == std::nullopt), leave SecTrust's default
   // anchor configuration intact so macOS evaluates system roots alongside user
   // and admin Keychain trust settings (including per-leaf or per-intermediate
@@ -128,8 +134,7 @@ uint32_t VerifyServerChainMacOS(
       CFArrayAppendValue(anchors.ref, sec_root.ref);
     }
     if (SecTrustSetAnchorCertificates(trust.ref, anchors.ref) != errSecSuccess ||
-        SecTrustSetAnchorCertificatesOnly(trust.ref, true) != errSecSuccess ||
-        SecTrustSetNetworkFetchAllowed(trust.ref, false) != errSecSuccess) {
+        SecTrustSetAnchorCertificatesOnly(trust.ref, true) != errSecSuccess) {
       return kErrorTrustStoreUnavailable;
     }
   }

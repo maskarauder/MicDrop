@@ -4,14 +4,19 @@
 package desktop
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"image/png"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -607,4 +612,833 @@ func TestLinuxDesktopGracefulQuitWaitsForControllerStop(t *testing.T) {
 	}
 	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 	_ = lockFile.Close()
+}
+
+func TestLinuxModalShutdownStateMachine(t *testing.T) {
+	for _, trigger := range []string{"signal", "exit_action"} {
+		for _, dialogCase := range []struct {
+			name string
+			open func(u *desktopWindow)
+		}{
+			{
+				name: "help_info",
+				open: func(u *desktopWindow) { u.action(idCableHelp) },
+			},
+			{
+				name: "confirm_forget",
+				open: func(u *desktopWindow) { u.action(idForget) },
+			},
+			{
+				name: "confirm_approve",
+				open: func(u *desktopWindow) { u.action(idApprove) },
+			},
+			{
+				name: "file_import",
+				open: func(u *desktopWindow) { u.action(idImport) },
+			},
+			{
+				name: "error_dialog",
+				open: func(u *desktopWindow) { u.showErr(errors.New("simulated failure")) },
+			},
+		} {
+			t.Run(trigger+"_"+dialogCase.name, func(t *testing.T) {
+				var imported, forgot, approved atomic.Bool
+				var lockReleased atomic.Bool
+				var cancelled atomic.Bool
+
+				readyCh := make(chan func(Event), 1)
+				backend := Backend{
+					Run: func(ctx context.Context, _ Settings, commands <-chan Command, emit func(Event)) error {
+						emit(Event{Kind: "ready", Message: "LAN control ready"})
+						emit(Event{Kind: "invitation", Link: "micdrop://pair/v1/test-fixture", Expires: time.Now().Add(time.Minute)})
+						emit(Event{Kind: "pending", Pending: Pending{ID: "req-123", Name: "Test Phone", Key: strings.Repeat("a", 64)}})
+						readyCh <- emit
+						for {
+							select {
+							case <-ctx.Done():
+								return nil
+							case cmd := <-commands:
+								if cmd.Action == "approve" {
+									approved.Store(true)
+								}
+							}
+						}
+					},
+					ImportRemote: func(string) error {
+						imported.Store(true)
+						return nil
+					},
+					ForgetRemote: func() error {
+						forgot.Store(true)
+						return nil
+					},
+				}
+
+				u := &desktopWindow{
+					backend:    backend,
+					controller: NewController(backend),
+					settings:   Defaults(),
+					directory:  t.TempDir(),
+					releaseLock: func() {
+						lockReleased.Store(true)
+					},
+					jobs:   make(chan uiResult, 1),
+					closed: make(chan struct{}),
+				}
+
+				needRunning := dialogCase.name == "confirm_approve" || dialogCase.name == "help_info" || dialogCase.name == "error_dialog"
+				if needRunning {
+					if err := u.controller.Start(u.settings); err != nil {
+						t.Fatalf("controller start: %v", err)
+					}
+					select {
+					case <-readyCh:
+					case <-time.After(3 * time.Second):
+						t.Fatal("controller did not reach ready state")
+					}
+					deadline := time.Now().Add(2 * time.Second)
+					for u.controller.Snapshot().Pending.ID == "" && time.Now().Before(deadline) {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+				defer func() {
+					<-u.controller.Stop()
+				}()
+
+				modalDismissed := make(chan struct{})
+				u.cancelModal = func() {
+					if cancelled.CompareAndSwap(false, true) {
+						close(modalDismissed)
+					}
+				}
+				u.modalRunner = func(kind, title, message string) (bool, string) {
+					if !u.modal {
+						t.Errorf("expected u.modal == true inside %s modal", kind)
+					}
+					if trigger == "signal" {
+						u.requestQuit.Store(true)
+						u.tick()
+					} else {
+						u.action(idExit)
+					}
+					select {
+					case <-modalDismissed:
+					case <-time.After(2 * time.Second):
+						t.Errorf("termination (%s) did not dismiss open %s modal", trigger, kind)
+					}
+					// Even if a dialog callback returns an affirmative response during cancellation,
+					// shutdown must ignore it and never mutate state.
+					return true, "/tmp/should-not-import.json"
+				}
+
+				dialogCase.open(u)
+
+				if !cancelled.Load() {
+					t.Fatal("cancelModal was not invoked")
+				}
+				if u.modal {
+					t.Fatal("u.modal remained true after dialog unwound")
+				}
+				if imported.Load() || forgot.Load() || approved.Load() {
+					t.Fatalf("cancelled dialog mutated state: imported=%v forgot=%v approved=%v",
+						imported.Load(), forgot.Load(), approved.Load())
+				}
+
+				deadline := time.Now().Add(3 * time.Second)
+				for !u.destroyed && time.Now().Before(deadline) {
+					u.tick()
+					if !u.destroyed {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+				if !u.destroyed {
+					t.Fatalf("window did not complete shutdown after dismissing %s modal", dialogCase.name)
+				}
+				if !lockReleased.Load() {
+					t.Fatal("instance lock was not released on modal shutdown")
+				}
+			})
+		}
+	}
+}
+
+func TestLinuxDesktopQuitDismissesOpenGTKDialogs(t *testing.T) {
+	if !hasLinuxDisplay() {
+		t.Skip("Linux GUI test requires DISPLAY or WAYLAND_DISPLAY")
+	}
+	setAllowModalsForTest(true)
+	defer setAllowModalsForTest(false)
+
+	uiDo := func(t *testing.T, fn func()) {
+		t.Helper()
+		done := make(chan struct{})
+		uiTestQueue <- func() {
+			fn()
+			close(done)
+		}
+		wakeTestQueue()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out dispatching onto GTK main thread")
+		}
+	}
+
+	waitForModal := func(t *testing.T) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var active bool
+			uiDo(t, func() { active = hasActiveModalForTest() })
+			if active {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("GTK modal dialog did not become active")
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+
+	assertLockReleased := func(t *testing.T, dir string) {
+		t.Helper()
+		lockFile, already, err := acquireInstanceLock(dir)
+		if err != nil || already || lockFile == nil {
+			t.Fatalf("desktop.lock was not released: already=%v err=%v", already, err)
+		}
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}
+
+	t.Run("SIGTERMDismissesHelpDialogAndReleasesLock", func(t *testing.T) {
+		configureTrayForTest(false, 0, "")
+		defer configureTrayForTest(false, -1, "")
+
+		started := make(chan struct{}, 1)
+		hostStopped := make(chan struct{})
+		finished := make(chan error, 1)
+
+		backend := Backend{
+			Run: func(ctx context.Context, _ Settings, _ <-chan Command, emit func(Event)) error {
+				emit(Event{Kind: "ready", Message: "LAN control ready"})
+				started <- struct{}{}
+				<-ctx.Done()
+				close(hostStopped)
+				return nil
+			},
+			Devices: func() ([]AudioDevice, error) {
+				return []AudioDevice{{ID: "speaker", Name: "PipeWire Output (test)", Default: true}}, nil
+			},
+			RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+		}
+
+		dir := t.TempDir()
+		settings := Defaults()
+		settings.Notifications = false
+		if err := SaveSettings(dir, settings); err != nil {
+			t.Fatal(err)
+		}
+
+		linuxMainThread <- func() {
+			finished <- runWindow(backend, dir, true, false)
+		}
+
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("runWindow failed to start: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("runWindow startup timed out")
+		}
+
+		modalReturned := make(chan struct{})
+		uiTestQueue <- func() {
+			triggerControlForTest(idCableHelp, 0)
+			close(modalReturned)
+		}
+		wakeTestQueue()
+
+		waitForModal(t)
+
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatalf("sending SIGTERM: %v", err)
+		}
+
+		select {
+		case <-modalReturned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("SIGTERM did not dismiss open GTK help dialog")
+		}
+		select {
+		case <-hostStopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("SIGTERM did not stop running host")
+		}
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("runWindow returned error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("runWindow did not finish after SIGTERM dismissed dialog")
+		}
+		assertLockReleased(t, dir)
+	})
+
+	for _, tc := range []struct {
+		name string
+		open func()
+	}{
+		{
+			name: "ConfirmDialog",
+			open: func() { triggerControlForTest(idForget, 0) },
+		},
+		{
+			name: "FileChooserNativeDialog",
+			open: func() { triggerControlForTest(idImport, 0) },
+		},
+		{
+			name: "ErrorDialog",
+			open: func() {
+				if activeWindow != nil {
+					activeWindow.showErr(errors.New("simulated configuration failure"))
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GSETTINGS_BACKEND", "memory")
+			var mutated atomic.Bool
+			devicesReady := make(chan struct{}, 1)
+			finished := make(chan error, 1)
+			backend := Backend{
+				Devices: func() ([]AudioDevice, error) {
+					select {
+					case devicesReady <- struct{}{}:
+					default:
+					}
+					return []AudioDevice{{ID: "speaker", Name: "PipeWire Output (test)", Default: true}}, nil
+				},
+				RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+				ImportRemote: func(string) error {
+					mutated.Store(true)
+					return nil
+				},
+				ForgetRemote: func() error {
+					mutated.Store(true)
+					return nil
+				},
+			}
+
+			dir := t.TempDir()
+			settings := Defaults()
+			settings.Notifications = false
+			if err := SaveSettings(dir, settings); err != nil {
+				t.Fatal(err)
+			}
+
+			linuxMainThread <- func() {
+				finished <- runWindow(backend, dir, false, true)
+			}
+			exited := false
+			defer func() {
+				if !exited {
+					uiTestQueue <- func() {
+						if activeWindow != nil {
+							activeWindow.requestQuit.Store(true)
+							activeWindow.tick()
+						}
+					}
+					wakeTestQueue()
+					select {
+					case <-finished:
+					case <-time.After(5 * time.Second):
+					}
+				}
+			}()
+
+			select {
+			case <-devicesReady:
+			case err := <-finished:
+				exited = true
+				t.Fatalf("runWindow exited early: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("runWindow did not reach initial device refresh")
+			}
+
+			// Wait until initial refresh job is processed on GTK main thread.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				var ready bool
+				uiDo(t, func() { ready = activeWindow != nil && !activeWindow.busy })
+				if ready {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("window did not finish initial refresh")
+				}
+				time.Sleep(15 * time.Millisecond)
+			}
+
+			modalReturned := make(chan struct{})
+			uiTestQueue <- func() {
+				tc.open()
+				close(modalReturned)
+			}
+			wakeTestQueue()
+
+			waitForModal(t)
+
+			uiDo(t, func() {
+				if activeWindow != nil {
+					activeWindow.requestQuit.Store(true)
+					activeWindow.tick()
+				}
+			})
+
+			select {
+			case <-modalReturned:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("termination did not dismiss %s", tc.name)
+			}
+			select {
+			case err := <-finished:
+				exited = true
+				if err != nil {
+					t.Fatalf("runWindow returned error: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("runWindow hung after dismissing %s", tc.name)
+			}
+			if mutated.Load() {
+				t.Fatalf("dismissed %s unexpectedly mutated remote configuration", tc.name)
+			}
+			assertLockReleased(t, dir)
+		})
+	}
+}
+
+func startPrivateDBusDaemon(t *testing.T) string {
+	t.Helper()
+	dbusBin, err := exec.LookPath("dbus-daemon")
+	if err != nil {
+		t.Skip("dbus-daemon not installed; skipping live D-Bus StatusNotifierWatcher test")
+	}
+	cmd := exec.Command(dbusBin, "--session", "--nofork", "--print-address=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("dbus-daemon stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting dbus-daemon: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	lineCh := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		if sc.Scan() {
+			lineCh <- strings.TrimSpace(sc.Text())
+		} else {
+			lineCh <- ""
+		}
+	}()
+	select {
+	case addr := <-lineCh:
+		if addr == "" {
+			t.Fatal("dbus-daemon returned empty session address")
+		}
+		return addr
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for dbus-daemon address")
+		return ""
+	}
+}
+
+func startMockStatusNotifierWatcher(t *testing.T, dbusAddr string, initialHostRegistered bool) (setHostRegistered func(bool)) {
+	t.Helper()
+	pyBin, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not installed; skipping mock StatusNotifierWatcher service")
+	}
+	script := `
+import ctypes, os, sys
+
+addr = sys.argv[1]
+host_reg = [1 if sys.argv[2] == "1" else 0]
+
+gio = ctypes.CDLL("libgio-2.0.so.0")
+glib = ctypes.CDLL("libglib-2.0.so.0")
+
+glib.g_variant_new_boolean.argtypes = [ctypes.c_int]
+glib.g_variant_new_boolean.restype = ctypes.c_void_p
+glib.g_main_context_default.argtypes = []
+glib.g_main_context_default.restype = ctypes.c_void_p
+glib.g_main_context_iteration.argtypes = [ctypes.c_void_p, ctypes.c_int]
+glib.g_main_context_iteration.restype = ctypes.c_int
+
+gio.g_dbus_connection_new_for_address_sync.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+gio.g_dbus_connection_new_for_address_sync.restype = ctypes.c_void_p
+gio.g_dbus_node_info_new_for_xml.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+gio.g_dbus_node_info_new_for_xml.restype = ctypes.c_void_p
+gio.g_dbus_node_info_lookup_interface.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+gio.g_dbus_node_info_lookup_interface.restype = ctypes.c_void_p
+gio.g_dbus_connection_emit_signal.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p]
+gio.g_dbus_connection_emit_signal.restype = ctypes.c_int
+gio.g_dbus_connection_flush_sync.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+gio.g_dbus_connection_flush_sync.restype = ctypes.c_int
+
+GET_PROP = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p)
+NAME_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p)
+
+class VTable(ctypes.Structure):
+    _fields_ = [
+        ("method_call", ctypes.c_void_p),
+        ("get_property", GET_PROP),
+        ("set_property", ctypes.c_void_p),
+        ("padding", ctypes.c_void_p * 8),
+    ]
+
+acquired = [False]
+
+@GET_PROP
+def on_get_prop(conn, sender, path, iface, prop, err, udata):
+    if prop == b"IsStatusNotifierHostRegistered":
+        return glib.g_variant_new_boolean(host_reg[0])
+    return None
+
+@NAME_CB
+def on_acq(conn, name, udata):
+    acquired[0] = True
+
+vt = VTable(None, on_get_prop, None)
+xml = (
+    b"<node><interface name='org.kde.StatusNotifierWatcher'>"
+    b"<property name='IsStatusNotifierHostRegistered' type='b' access='read'/>"
+    b"<signal name='StatusNotifierHostRegistered'/>"
+    b"<signal name='StatusNotifierHostUnregistered'/>"
+    b"</interface></node>"
+)
+node = gio.g_dbus_node_info_new_for_xml(xml, None)
+iface = gio.g_dbus_node_info_lookup_interface(node, b"org.kde.StatusNotifierWatcher")
+conn = gio.g_dbus_connection_new_for_address_sync(addr.encode(), 9, None, None, None)
+
+gio.g_dbus_connection_register_object.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(VTable), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+gio.g_dbus_connection_register_object.restype = ctypes.c_uint
+gio.g_dbus_connection_register_object(conn, b"/StatusNotifierWatcher", iface, ctypes.byref(vt), None, None, None)
+
+gio.g_bus_own_name_on_connection.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, NAME_CB, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+gio.g_bus_own_name_on_connection.restype = ctypes.c_uint
+gio.g_bus_own_name_on_connection(conn, b"org.kde.StatusNotifierWatcher", 0, on_acq, None, None, None)
+
+ctx = glib.g_main_context_default()
+while not acquired[0]:
+    glib.g_main_context_iteration(ctx, 1)
+
+os.set_blocking(sys.stdin.fileno(), False)
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+
+buf = b""
+import select
+while True:
+    while glib.g_main_context_iteration(ctx, 0):
+        pass
+    r, _, _ = select.select([sys.stdin], [], [], 0.01)
+    if r:
+        chunk = os.read(sys.stdin.fileno(), 64)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            cmd = line.strip()
+            if cmd == b"0":
+                host_reg[0] = 0
+                gio.g_dbus_connection_emit_signal(conn, None, b"/StatusNotifierWatcher", b"org.kde.StatusNotifierWatcher", b"StatusNotifierHostUnregistered", None, None)
+                gio.g_dbus_connection_flush_sync(conn, None, None)
+                sys.stdout.write("ACK\n")
+                sys.stdout.flush()
+            elif cmd == b"1":
+                host_reg[0] = 1
+                gio.g_dbus_connection_emit_signal(conn, None, b"/StatusNotifierWatcher", b"org.kde.StatusNotifierWatcher", b"StatusNotifierHostRegistered", None, None)
+                gio.g_dbus_connection_flush_sync(conn, None, None)
+                sys.stdout.write("ACK\n")
+                sys.stdout.flush()
+`
+	initArg := "0"
+	if initialHostRegistered {
+		initArg = "1"
+	}
+	cmd := exec.Command(pyBin, "-c", script, dbusAddr, initArg)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("watcher stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("watcher stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	sc := bufio.NewScanner(stdout)
+	readyCh := make(chan bool, 1)
+	ackCh := make(chan bool, 4)
+	go func() {
+		for sc.Scan() {
+			txt := strings.TrimSpace(sc.Text())
+			if txt == "READY" {
+				readyCh <- true
+			} else if txt == "ACK" {
+				ackCh <- true
+			}
+		}
+	}()
+	select {
+	case <-readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for mock StatusNotifierWatcher READY")
+	}
+
+	return func(registered bool) {
+		val := "0\n"
+		if registered {
+			val = "1\n"
+		}
+		if _, err := io.WriteString(stdin, val); err != nil {
+			t.Fatalf("sending watcher update: %v", err)
+		}
+		select {
+		case <-ackCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for mock StatusNotifierWatcher ACK")
+		}
+	}
+}
+
+func TestLinuxDesktopTrayHostAvailabilityFallback(t *testing.T) {
+	if !hasLinuxDisplay() {
+		t.Skip("Linux GUI test requires DISPLAY or WAYLAND_DISPLAY")
+	}
+	defer configureTrayForTest(false, -1, "")
+
+	uiDo := func(t *testing.T, fn func()) {
+		t.Helper()
+		done := make(chan struct{})
+		uiTestQueue <- func() {
+			fn()
+			close(done)
+		}
+		wakeTestQueue()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out dispatching onto GTK main thread")
+		}
+	}
+
+	newBackend := func(started chan<- struct{}) Backend {
+		return Backend{
+			Run: func(ctx context.Context, _ Settings, _ <-chan Command, emit func(Event)) error {
+				emit(Event{Kind: "ready", Message: "LAN control ready"})
+				started <- struct{}{}
+				<-ctx.Done()
+				return nil
+			},
+			Devices: func() ([]AudioDevice, error) {
+				return []AudioDevice{{ID: "speaker", Name: "PipeWire Output (test)", Default: true}}, nil
+			},
+			RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+		}
+	}
+
+	t.Run("AllocatedIndicatorWithoutWatcherUsesMinimizedAndCleanExit", func(t *testing.T) {
+		dbusAddr := startPrivateDBusDaemon(t)
+		configureTrayForTest(true, -1, dbusAddr)
+		defer configureTrayForTest(false, -1, "")
+
+		started := make(chan struct{}, 1)
+		finished := make(chan error, 1)
+		dir := t.TempDir()
+		settings := Defaults()
+		settings.Notifications = false
+		if err := SaveSettings(dir, settings); err != nil {
+			t.Fatal(err)
+		}
+
+		linuxMainThread <- func() {
+			finished <- runWindow(newBackend(started), dir, true, false)
+		}
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("runWindow failed to start: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("runWindow startup timed out")
+		}
+
+		var hasTray, visible bool
+		uiDo(t, func() {
+			hasTray = hasTrayForTest()
+			visible = windowVisibleForTest()
+		})
+		if hasTray {
+			t.Fatal("expected hasTray == false when StatusNotifierWatcher is absent")
+		}
+		if !visible {
+			t.Fatal("window was hidden despite having no active tray host")
+		}
+
+		uiDo(t, func() { closeWindowForTest() })
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("runWindow returned error on close fallback: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("closing window without tray host did not exit cleanly")
+		}
+	})
+
+	t.Run("WatcherWithUnregisteredHostUsesMinimizedAndCleanExit", func(t *testing.T) {
+		dbusAddr := startPrivateDBusDaemon(t)
+		_ = startMockStatusNotifierWatcher(t, dbusAddr, false)
+		configureTrayForTest(true, -1, dbusAddr)
+		defer configureTrayForTest(false, -1, "")
+
+		started := make(chan struct{}, 1)
+		finished := make(chan error, 1)
+		dir := t.TempDir()
+		settings := Defaults()
+		settings.Notifications = false
+		if err := SaveSettings(dir, settings); err != nil {
+			t.Fatal(err)
+		}
+
+		linuxMainThread <- func() {
+			finished <- runWindow(newBackend(started), dir, true, false)
+		}
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("runWindow failed to start: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("runWindow startup timed out")
+		}
+
+		var hasTray, visible bool
+		uiDo(t, func() {
+			hasTray = hasTrayForTest()
+			visible = windowVisibleForTest()
+		})
+		if hasTray {
+			t.Fatal("expected hasTray == false when IsStatusNotifierHostRegistered is false")
+		}
+		if !visible {
+			t.Fatal("window was hidden despite IsStatusNotifierHostRegistered being false")
+		}
+
+		uiDo(t, func() { closeWindowForTest() })
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("runWindow returned error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("closing window with unregistered tray host did not exit cleanly")
+		}
+	})
+
+	t.Run("ActiveHostHidesToTrayAndSurfacesWhenHostDisappears", func(t *testing.T) {
+		dbusAddr := startPrivateDBusDaemon(t)
+		setHost := startMockStatusNotifierWatcher(t, dbusAddr, true)
+		configureTrayForTest(true, -1, dbusAddr)
+		defer configureTrayForTest(false, -1, "")
+
+		started := make(chan struct{}, 1)
+		finished := make(chan error, 1)
+		dir := t.TempDir()
+		settings := Defaults()
+		settings.Notifications = false
+		if err := SaveSettings(dir, settings); err != nil {
+			t.Fatal(err)
+		}
+
+		linuxMainThread <- func() {
+			finished <- runWindow(newBackend(started), dir, true, false)
+		}
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("runWindow failed to start: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("runWindow startup timed out")
+		}
+
+		var hasTray, visible bool
+		uiDo(t, func() {
+			hasTray = hasTrayForTest()
+			visible = windowVisibleForTest()
+		})
+		if !hasTray {
+			t.Fatal("expected hasTray == true when IsStatusNotifierHostRegistered is true")
+		}
+		if visible {
+			t.Fatal("expected --background launch to hide window when tray host is active")
+		}
+
+		// Show window, then verify delete-event hides to tray without exiting.
+		uiDo(t, func() { goMicDropShow() })
+		uiDo(t, func() { visible = windowVisibleForTest() })
+		if !visible {
+			t.Fatal("expected goMicDropShow to reveal window")
+		}
+		uiDo(t, func() { closeWindowForTest() })
+		uiDo(t, func() { visible = windowVisibleForTest() })
+		if visible {
+			t.Fatal("expected closing window with active tray host to hide window")
+		}
+		select {
+		case err := <-finished:
+			t.Fatalf("closing window with active tray host unexpectedly exited: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		// Unregister the StatusNotifierHost mid-session; MicDrop must detect loss and surface the hidden window.
+		setHost(false)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			uiDo(t, func() {
+				hasTray = hasTrayForTest()
+				visible = windowVisibleForTest()
+			})
+			if !hasTray && visible {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("window did not surface after tray host disappeared: hasTray=%v visible=%v", hasTray, visible)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		// Now that no tray host is registered, closing the window must exit cleanly.
+		uiDo(t, func() { closeWindowForTest() })
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("runWindow returned error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("closing window after tray host disappeared did not exit cleanly")
+		}
+	})
 }

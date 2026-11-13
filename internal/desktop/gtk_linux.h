@@ -67,11 +67,17 @@ void md_ui_show_error(const char* message);
 void md_ui_show_info(const char* title, const char* message);
 int md_ui_confirm(const char* message);
 char* md_ui_choose_json_file(void);
+void md_ui_dismiss_modals(void);
+int md_ui_has_active_modal(void);
 int md_ui_copy_clipboard(const char* text);
 int md_ui_open_path(const char* path);
 
 int md_ui_check_bounds(int id, int* out_x, int* out_y, int* out_w, int* out_h, int* win_w, int* win_h);
 int md_ui_capture_png(const char* out_path);
 void md_ui_trigger(int id, int event_kind);
+int md_ui_window_visible_for_test(void);
+void md_ui_close_window_for_test(void);
+void md_test_configure_tray(int simulated_indicator, int host_override, const char* dbus_addr);
+void md_test_set_allow_modals(int allow);
 
 #endif

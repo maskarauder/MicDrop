@@ -14,6 +14,15 @@ import (
 
 const linuxDesktopEntryFilename = "micdrop.desktop"
 
+// escapeDesktopString applies the outer Desktop Entry "string" value escaping
+// layer (parsed first by GKeyFile before Exec token unquoting).
+func escapeDesktopString(s string) string {
+	return strings.ReplaceAll(s, `\`, `\\`)
+}
+
+// quoteDesktopExecArg applies inner Desktop Entry Exec token quoting and
+// field-code escaping. Callers writing to a .desktop key must also apply
+// escapeDesktopString to the complete Exec value.
 func quoteDesktopExecArg(arg string) (string, error) {
 	if arg == "" || !utf8.ValidString(arg) {
 		return "", errors.New("desktop entry argument is invalid")
@@ -40,18 +49,29 @@ func quoteDesktopExecArg(arg string) (string, error) {
 	return out.String(), nil
 }
 
-func validateLinuxExecutablePath(exePath string) (string, error) {
+func formatLinuxDesktopExec(exePath string, args ...string) (string, error) {
 	if !path.IsAbs(exePath) || exePath == "/" || path.Clean(exePath) != exePath {
 		return "", errors.New("startup requires an absolute application path")
 	}
 	if len(exePath) > 1024 || !utf8.ValidString(exePath) {
 		return "", errors.New("the app path is invalid or too long for Linux desktop integration")
 	}
-	return quoteDesktopExecArg(exePath)
+	quotedExe, err := quoteDesktopExecArg(exePath)
+	if err != nil {
+		return "", err
+	}
+	var tokens []string
+	if strings.ContainsRune(exePath, '%') {
+		// GDesktopAppInfo checks argv[0] existence before expanding %% field codes.
+		tokens = append(tokens, "/usr/bin/env")
+	}
+	tokens = append(tokens, quotedExe)
+	tokens = append(tokens, args...)
+	return escapeDesktopString(strings.Join(tokens, " ")), nil
 }
 
 func desktopEntryAutostart(exePath string) ([]byte, error) {
-	quotedExe, err := validateLinuxExecutablePath(exePath)
+	execVal, err := formatLinuxDesktopExec(exePath, "desktop", "--background")
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +82,7 @@ func desktopEntryAutostart(exePath string) ([]byte, error) {
 	buf.WriteString("Name=MicDrop\n")
 	buf.WriteString("Comment=Encrypted phone-to-desktop audio and microphone host\n")
 	buf.WriteString("Icon=audio-input-microphone\n")
-	buf.WriteString("Exec=" + quotedExe + " desktop --background\n")
+	buf.WriteString("Exec=" + execVal + "\n")
 	buf.WriteString("Terminal=false\n")
 	buf.WriteString("Categories=AudioVideo;Audio;Network;\n")
 	buf.WriteString("StartupNotify=false\n")
@@ -72,7 +92,7 @@ func desktopEntryAutostart(exePath string) ([]byte, error) {
 }
 
 func desktopEntryLauncher(exePath string) ([]byte, error) {
-	quotedExe, err := validateLinuxExecutablePath(exePath)
+	execVal, err := formatLinuxDesktopExec(exePath, "desktop")
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +103,7 @@ func desktopEntryLauncher(exePath string) ([]byte, error) {
 	buf.WriteString("Name=MicDrop\n")
 	buf.WriteString("Comment=Encrypted phone-to-desktop audio and microphone host\n")
 	buf.WriteString("Icon=audio-input-microphone\n")
-	buf.WriteString("Exec=" + quotedExe + " desktop\n")
+	buf.WriteString("Exec=" + execVal + "\n")
 	buf.WriteString("Terminal=false\n")
 	buf.WriteString("Categories=AudioVideo;Audio;Network;\n")
 	buf.WriteString("StartupNotify=true\n")

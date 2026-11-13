@@ -24,13 +24,23 @@ func TestLinuxDesktopEntryQuotingAndValidation(t *testing.T) {
 		}
 	}
 
+	noPercentSpecial := `/home/alice/My Apps $1 "test" \ ` + "`bin`" + `/micdrop-host`
+	noPercentData, err := desktopEntryLauncher(noPercentSpecial)
+	if err != nil {
+		t.Fatalf("desktopEntryLauncher failed: %v", err)
+	}
+	wantNoPercentExec := `Exec="/home/alice/My Apps \\$1 \\"test\\" \\\\ \\` + "`bin\\\\`" + `/micdrop-host" desktop` + "\n"
+	if !strings.Contains(string(noPercentData), wantNoPercentExec) {
+		t.Fatalf("unexpected Exec line in:\n%s\nwant substring:\n%s", string(noPercentData), wantNoPercentExec)
+	}
+
 	specialPath := `/home/alice/My Apps $1 "test" \ 100% ` + "`bin`" + `/micdrop-host`
 	data, err := desktopEntryAutostart(specialPath)
 	if err != nil {
 		t.Fatalf("desktopEntryAutostart failed: %v", err)
 	}
 	text := string(data)
-	wantExec := `Exec="/home/alice/My Apps \$1 \"test\" \\ 100%% \` + "`bin\\`/micdrop-host\" desktop --background\n"
+	wantExec := `Exec=/usr/bin/env "/home/alice/My Apps \\$1 \\"test\\" \\\\ 100%% \\` + "`bin\\\\`" + `/micdrop-host" desktop --background` + "\n"
 	if !strings.Contains(text, wantExec) {
 		t.Fatalf("unexpected Exec line in:\n%s\nwant substring:\n%s", text, wantExec)
 	}

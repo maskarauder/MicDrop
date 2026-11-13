@@ -122,6 +122,8 @@ int main() {
         diagnostics, std::nullopt, micdrop::test::kShortVerifyUnixSeconds);
     Require(!live_store_at_fixture_time.VerifyChain(supplied_root_chain),
             "Live POSIX trust store accepted unanchored chain inside validity window");
+    Require(!live_store_at_fixture_time.Verify(server.Get(0)),
+            "Live POSIX trust store accepted incomplete leaf chain");
 #ifdef __APPLE__
     micdrop::PosixCertificateVerifier::RootList legacy_roots;
     auto legacy_root = webrtc::SSLCertificate::FromPEMString(micdrop::test::kRoot);
@@ -155,11 +157,11 @@ int main() {
     constexpr uint64_t kExpectedChecks = 8;
     constexpr uint64_t kExpectedFailures = 6;
 #elif defined(__APPLE__)
+    constexpr uint64_t kExpectedChecks = 11;
+    constexpr uint64_t kExpectedFailures = 9;
+#else
     constexpr uint64_t kExpectedChecks = 10;
     constexpr uint64_t kExpectedFailures = 8;
-#else
-    constexpr uint64_t kExpectedChecks = 9;
-    constexpr uint64_t kExpectedFailures = 7;
 #endif
     Require(stats.checks == kExpectedChecks &&
                 stats.failures == kExpectedFailures &&

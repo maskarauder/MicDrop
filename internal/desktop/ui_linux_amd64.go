@@ -106,6 +106,9 @@ type desktopWindow struct {
 	trayStatus                 string
 	busy, closing, destroyed   bool
 	modal                      bool
+	allowTestModals            bool
+	modalRunner                func(kind, title, message string) (bool, string)
+	cancelModal                func()
 	requestShow                atomic.Bool
 	requestQuit                atomic.Bool
 	releaseLock                func()
@@ -127,6 +130,7 @@ type desktopWindow struct {
 
 var activeWindow *desktopWindow
 var uiTestQueue = make(chan func(), 32)
+var uiAllowModalsInTest atomic.Bool
 
 //export goMicDropTick
 func goMicDropTick() {
@@ -240,15 +244,16 @@ func runWindow(backend Backend, directory string, background bool, headlessTest 
 	}
 
 	u := &desktopWindow{
-		backend:      backend,
-		controller:   NewController(backend),
-		settings:     settings,
-		directory:    directory,
-		headlessTest: headlessTest,
-		releaseLock:  releaseLock,
-		jobs:         make(chan uiResult, 1),
-		closed:       make(chan struct{}),
-		labelID:      1000,
+		backend:         backend,
+		controller:      NewController(backend),
+		settings:        settings,
+		directory:       directory,
+		headlessTest:    headlessTest,
+		allowTestModals: uiAllowModalsInTest.Load(),
+		releaseLock:     releaseLock,
+		jobs:            make(chan uiResult, 1),
+		closed:          make(chan struct{}),
+		labelID:         1000,
 	}
 	detachWindow := sync.OnceFunc(func() {
 		u.destroyed = true
@@ -701,41 +706,90 @@ func (u *desktopWindow) inventory(r uiResult) {
 	uiSetText(idRemoteStatus, r.remote)
 }
 
+func (u *desktopWindow) dismissModal() {
+	if u.cancelModal != nil {
+		u.cancelModal()
+	}
+	C.md_ui_dismiss_modals()
+}
+
+func (u *desktopWindow) finishModal() {
+	u.modal = false
+	if u.closing && !u.destroyed {
+		C.md_app_dispatch_wake()
+	}
+}
+
 func (u *desktopWindow) showErr(err error) {
 	if err == nil || u.closing || u.destroyed || u.modal {
 		return
 	}
-	if u.headlessTest {
+	if u.headlessTest && !u.allowTestModals && u.modalRunner == nil {
 		uiSetText(idMessage, err.Error())
 		return
 	}
 	u.modal = true
-	defer func() { u.modal = false }()
+	defer u.finishModal()
+	if u.modalRunner != nil {
+		u.modalRunner("error", "MicDrop", err.Error())
+		return
+	}
 	ShowError(err)
 }
 
+func (u *desktopWindow) showInfo(title, message string) {
+	if u.closing || u.destroyed || u.modal || (u.headlessTest && !u.allowTestModals && u.modalRunner == nil) {
+		return
+	}
+	u.modal = true
+	defer u.finishModal()
+	if u.modalRunner != nil {
+		u.modalRunner("info", title, message)
+		return
+	}
+	cTitle := C.CString(title)
+	cMsg := C.CString(message)
+	defer C.free(unsafe.Pointer(cTitle))
+	defer C.free(unsafe.Pointer(cMsg))
+	C.md_ui_show_info(cTitle, cMsg)
+}
+
 func (u *desktopWindow) askConfirm(text string) bool {
-	if u.closing || u.destroyed || u.modal || u.headlessTest {
+	if u.closing || u.destroyed || u.modal || (u.headlessTest && !u.allowTestModals && u.modalRunner == nil) {
 		return false
 	}
 	u.modal = true
-	defer func() { u.modal = false }()
+	defer u.finishModal()
+	if u.modalRunner != nil {
+		ok, _ := u.modalRunner("confirm", "MicDrop", text)
+		return ok && !u.closing
+	}
 	cs := C.CString(text)
 	defer C.free(unsafe.Pointer(cs))
-	return C.md_ui_confirm(cs) != 0
+	return C.md_ui_confirm(cs) != 0 && !u.closing
 }
 
 func (u *desktopWindow) pickConfig() (string, error) {
-	if u.closing || u.destroyed || u.modal || u.headlessTest {
+	if u.closing || u.destroyed || u.modal || (u.headlessTest && !u.allowTestModals && u.modalRunner == nil) {
 		return "", nil
 	}
 	u.modal = true
-	defer func() { u.modal = false }()
+	defer u.finishModal()
+	if u.modalRunner != nil {
+		_, chosen := u.modalRunner("file", "Import private MicDrop remote configuration", "")
+		if u.closing {
+			return "", nil
+		}
+		return chosen, nil
+	}
 	ptr := C.md_ui_choose_json_file()
 	if ptr == nil {
 		return "", nil
 	}
 	defer C.free(unsafe.Pointer(ptr))
+	if u.closing {
+		return "", nil
+	}
 	return C.GoString(ptr), nil
 }
 
@@ -785,6 +839,9 @@ func (u *desktopWindow) tick() {
 		u.closing = true
 		u.controller.Stop()
 	}
+	if u.closing && u.modal {
+		u.dismissModal()
+	}
 	if u.requestShow.Swap(false) && !u.closing {
 		u.show()
 	}
@@ -800,7 +857,7 @@ func (u *desktopWindow) tick() {
 		if r.err != nil {
 			if u.modal && !u.closing {
 				uiSetText(idMessage, r.err.Error())
-			} else {
+			} else if !u.closing {
 				u.showErr(r.err)
 			}
 		} else if r.message != "" {
@@ -1029,6 +1086,9 @@ func (u *desktopWindow) action(id int) {
 			}
 			action = "approve"
 		}
+		if u.closing || u.destroyed {
+			return
+		}
 		u.showErr(u.controller.Command(Command{Action: action, Value: pending.ID}))
 	case idRemove:
 		idx := uiListSelected(idPhoneList)
@@ -1038,6 +1098,9 @@ func (u *desktopWindow) action(id int) {
 		}
 		key := u.phoneKeys[idx]
 		if u.askConfirm("Remove this phone and stop its active stream?\n\nPhone key: " + key) {
+			if u.closing || u.destroyed {
+				return
+			}
 			u.showErr(u.controller.Command(Command{Action: "revoke", Value: key}))
 		}
 	case idCopy:
@@ -1062,43 +1125,35 @@ func (u *desktopWindow) action(id int) {
 			}
 		}
 	case idFirewall:
-		if !u.modal && !u.headlessTest {
+		if !u.modal && !u.closing && !u.destroyed {
 			port := u.settings.Port
 			if p, err := strconv.Atoi(strings.TrimSpace(uiTextAt(idPort))); err == nil && p >= 1 && p <= 65535 {
 				port = p
 			}
-			u.modal = true
-			cTitle := C.CString("Linux firewall ports for LAN discovery and streaming")
-			cMsg := C.CString(fmt.Sprintf(
-				"If a host firewall (such as ufw or firewalld) blocks incoming LAN connections, allow these ports on your trusted home network interface:\n\n"+
-					"• Control WebSocket: %d/tcp\n"+
-					"• Local discovery (mDNS): 5353/udp\n"+
-					"• WebRTC audio media: ephemeral UDP on your LAN interface\n\n"+
-					"Example (ufw): sudo ufw allow %d/tcp\n"+
-					"Example (firewalld): sudo firewall-cmd --add-port=%d/tcp --add-service=mdns",
-				port, port, port))
-			C.md_ui_show_info(cTitle, cMsg)
-			C.free(unsafe.Pointer(cTitle))
-			C.free(unsafe.Pointer(cMsg))
-			u.modal = false
+			u.showInfo(
+				"Linux firewall ports for LAN discovery and streaming",
+				fmt.Sprintf(
+					"If a host firewall (such as ufw or firewalld) blocks incoming LAN connections, allow these ports on your trusted home network interface:\n\n"+
+						"• Control WebSocket: %d/tcp\n"+
+						"• Local discovery (mDNS): 5353/udp\n"+
+						"• WebRTC audio media: ephemeral UDP on your LAN interface\n\n"+
+						"Example (ufw): sudo ufw allow %d/tcp\n"+
+						"Example (firewalld): sudo firewall-cmd --add-port=%d/tcp --add-service=mdns",
+					port, port, port),
+			)
 		}
 	case idCableHelp:
-		if !u.modal && !u.headlessTest {
-			u.modal = true
-			cTitle := C.CString("Linux audio and virtual microphone setup")
-			cMsg := C.CString(
-				"Desktop audio capture uses PipeWire (pipewire-pulse) or PulseAudio sink monitor sources (<sink>.monitor) on demand when an authenticated phone connects.\n\n" +
-					"For phone microphone return, create a user-space virtual sink and remapped source:\n" +
-					"  pactl load-module module-null-sink sink_name=MicDropCable sink_properties=device.description=MicDropCable\n" +
-					"  pactl load-module module-remap-source master=MicDropCable.monitor source_name=MicDropMic source_properties=device.description=MicDropMic\n\n" +
-					"Choose MicDropCable here as the Phone microphone destination, and select MicDropMic (or Monitor of MicDropCable) in Discord, Zoom, or your voice app. Desktop playback works with microphone return disabled.")
-			C.md_ui_show_info(cTitle, cMsg)
-			C.free(unsafe.Pointer(cTitle))
-			C.free(unsafe.Pointer(cMsg))
-			u.modal = false
-		}
+		u.showInfo(
+			"Linux audio and virtual microphone setup",
+			"Desktop audio capture uses PipeWire (pipewire-pulse) or PulseAudio sink monitor sources (<sink>.monitor) on demand when an authenticated phone connects.\n\n"+
+				"For phone microphone return, create a user-space virtual sink and remapped source:\n"+
+				"  pactl load-module module-null-sink sink_name=MicDropCable sink_properties=device.description=MicDropCable\n"+
+				"  pactl load-module module-remap-source master=MicDropCable.monitor source_name=MicDropMic source_properties=device.description=MicDropMic\n\n"+
+				"Choose MicDropCable here as the Phone microphone destination, and select MicDropMic (or Monitor of MicDropCable) in Discord, Zoom, or your voice app. Desktop playback works with microphone return disabled.",
+		)
 	case idExit:
 		u.closing = true
+		u.dismissModal()
 		u.controller.Stop()
 	}
 	u.tick()
@@ -1132,4 +1187,42 @@ func capturePNGForTest(path string) bool {
 	cs := C.CString(path)
 	defer C.free(unsafe.Pointer(cs))
 	return C.md_ui_capture_png(cs) != 0
+}
+
+func hasActiveModalForTest() bool {
+	return C.md_ui_has_active_modal() != 0
+}
+
+func hasTrayForTest() bool {
+	return C.md_app_has_tray() != 0
+}
+
+func windowVisibleForTest() bool {
+	return C.md_ui_window_visible_for_test() != 0
+}
+
+func closeWindowForTest() {
+	C.md_ui_close_window_for_test()
+}
+
+func configureTrayForTest(simIndicator bool, hostOverride int, dbusAddr string) {
+	sim := C.int(0)
+	if simIndicator {
+		sim = 1
+	}
+	var cAddr *C.char
+	if dbusAddr != "" {
+		cAddr = C.CString(dbusAddr)
+		defer C.free(unsafe.Pointer(cAddr))
+	}
+	C.md_test_configure_tray(sim, C.int(hostOverride), cAddr)
+}
+
+func setAllowModalsForTest(allow bool) {
+	uiAllowModalsInTest.Store(allow)
+	flag := C.int(0)
+	if allow {
+		flag = 1
+	}
+	C.md_test_set_allow_modals(flag)
 }

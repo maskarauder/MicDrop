@@ -15,9 +15,9 @@
   - `micdrop-host` loads GTK3, GDK3, Cairo, GIO, GObject, and GLib at runtime via `dlopen` (`-ldl` only). Headless Linux servers and containers can run every CLI subcommand (`stream`, `doctor`, `rtc-check`, `devices`, `capture`, etc.) without GTK3, Wayland, or X11 libraries installed.
 - **Themed System Icons & Optional Tray Indicator:**
   - Uses standard freedesktop themed icons (`audio-input-microphone` and `audio-input-microphone-symbolic`). No custom generated icon artwork is bundled.
-  - Automatically detects and loads `libayatana-appindicator3.so.1` or `libappindicator3.so.1` when installed:
-    - **With AppIndicator:** Closing the window hides MicDrop to the panel tray (`Open MicDrop`, `Start host`, `Stop host`, `Quit MicDrop`), and `--background` starts hidden in the tray.
-    - **Without AppIndicator (stock GNOME without an indicator extension):** Closing the window performs a clean host shutdown and exits rather than leaving an unreachable background process, and `--background` starts minimized in the window list/overview.
+  - Automatically detects `libayatana-appindicator3.so.1` or `libappindicator3.so.1` **and** checks whether the desktop session actually provides a registered `org.kde.StatusNotifierWatcher` tray host:
+    - **With AppIndicator and an active tray host:** Closing the window hides MicDrop to the panel tray (`Open MicDrop`, `Start host`, `Stop host`, `Quit MicDrop`), and `--background` starts hidden in the tray. If the tray host disappears while hidden, MicDrop automatically surfaces as a minimized window.
+    - **Without an active tray host (including GNOME with the library installed but the indicator extension disabled):** Closing the window performs a clean host shutdown and exits rather than leaving an unreachable background process, and `--background` starts minimized in the window list/overview.
   - Respects Linux `HighContrast` / `HighContrastInverse` accessibility themes automatically.
   - Launching a second desktop instance signals the active instance (`desktop.lock` + `SIGUSR1`) to raise and focus the existing window.
 
@@ -26,7 +26,7 @@
 - **Desktop preferences, lock & logs:** `$XDG_CONFIG_HOME/MicDrop/desktop-v1.json` (defaults to `~/.config/MicDrop/desktop-v1.json`), `desktop.lock`, and `~/.config/MicDrop/logs/`.
 - **Host identity, paired phones & remote config:** `~/.config/MicDrop/identity/` and `~/.config/MicDrop/keystore/` (mode `0700` directories, `0600` AES-256-GCM keystore envelope + `flock`).
 - **Optional login autostart:** `~/.config/autostart/micdrop.desktop` (created only when `Start host when I sign in to Linux` is enabled; removed when unchecked).
-- **Optional application menu launcher:** `~/.local/share/applications/micdrop.desktop` (installed explicitly via `--install-launcher` and removed via `--uninstall-launcher`).
+- **Optional application menu launcher:** `~/.local/share/applications/micdrop.desktop` (installed explicitly via `./micdrop-host desktop --install-launcher` and removed via `./micdrop-host desktop --uninstall-launcher`).
 
 ## Launching and Desktop Menu Integration
 

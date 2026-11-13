@@ -49,9 +49,10 @@ Download matching desktop and phone packages from the latest release on the
      launch **MicDrop** from the Start menu or system tray
      ([Windows guide](docs/WINDOWS_DESKTOP.md)).
    - **macOS 14.2+ (Apple Silicon):** Open **MicDrop.app** (or run
-     `./micdrop-host` from the CLI; [macOS guide](docs/MACOS_DESKTOP.md)).
-   - **Linux (x64):** Run `./micdrop-host desktop` (or `--install-launcher` to
-     add an application menu entry; [Linux guide](docs/LINUX_DESKTOP.md)).
+     `./micdrop-host desktop` from the CLI; [macOS guide](docs/MACOS_DESKTOP.md)).
+   - **Linux (x64):** Run `./micdrop-host desktop` (or
+     `./micdrop-host desktop --install-launcher` to add an application menu
+     entry; [Linux guide](docs/LINUX_DESKTOP.md)).
 2. **Install on your phone:** Install the matching Android `.apk` or sideload
    the iPhone `.ipa` from the same release version.
 3. **Pair your phone:** Open the **Phones** tab and click **Pair a phone** in
