@@ -11,6 +11,7 @@ cleanup step.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -29,7 +30,8 @@ import zipfile
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-RESOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{1,62}$")
+ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{1,61}[A-Za-z0-9]$")
+CERT_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{1,98}[A-Za-z0-9]$")
 ENDPOINT_HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.codesigning\.azure\.net$")
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 DOTNET_RUNTIME_RE = re.compile(r"^Microsoft\.NETCore\.App\s+(\d+)\.\d+", re.MULTILINE)
@@ -99,15 +101,31 @@ def _redact(text, sensitive):
 
 def run_tool(arguments, *, redact=(), env=None, timeout=180):
     str_args = [str(a) for a in arguments]
-    proc = subprocess.run(
-        str_args,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
+    tool_name = Path(str_args[0]).name
+    try:
+        proc = subprocess.run(
+            str_args,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        combined = "\n".join(part.strip() for part in (out, err) if part and part.strip())
+        detail = _redact(combined, redact)
+        if len(detail) > 2500:
+            detail = detail[-2500:]
+        msg = f"{tool_name} timed out after {timeout}s"
+        if detail:
+            msg = f"{msg}: {detail}"
+        raise RuntimeError(msg) from None
+    except OSError as exc:
+        detail = _redact(str(exc), redact)
+        raise RuntimeError(f"{tool_name} could not be started: {detail}") from None
+
     if proc.returncode != 0:
-        tool_name = Path(str_args[0]).name
         combined = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
         detail = _redact(combined, redact)
         if len(detail) > 2500:
@@ -309,6 +327,24 @@ def _fetch_github_oidc_token(request_url, request_token, token_file):
     return jwt_value
 
 
+def _jwt_expiration_epoch(jwt_token):
+    parts = jwt_token.split(".")
+    if len(parts) != 3:
+        return None
+    payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+        claims = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    exp = claims.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    return float(exp)
+
+
 def _make_work_dir():
     runner_temp = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
     path = Path(tempfile.mkdtemp(prefix="micdrop-windows-signing-", dir=runner_temp))
@@ -401,9 +437,9 @@ def prepare(*, repo_root=REPO_ROOT):
         if not UUID_RE.fullmatch(client_id):
             raise ValueError("AZURE_CLIENT_ID must be a valid Entra application (client) UUID")
         endpoint = _validate_endpoint(raw_endpoint)
-        if not RESOURCE_NAME_RE.fullmatch(account):
+        if not ACCOUNT_NAME_RE.fullmatch(account):
             raise ValueError("AZURE_SIGNING_ACCOUNT has an invalid Azure resource name format")
-        if not RESOURCE_NAME_RE.fullmatch(cert_profile):
+        if not CERT_PROFILE_NAME_RE.fullmatch(cert_profile):
             raise ValueError("AZURE_SIGNING_CERT_PROFILE has an invalid certificate profile format")
 
         oidc_url = _clean_env("ACTIONS_ID_TOKEN_REQUEST_URL")
@@ -516,18 +552,20 @@ def sign_files(paths, *, retry_delays=(2.0, 5.0)):
 
     sensitive = []
     auth_mode = state["auth_mode"]
+    token_file = None
+    oidc_url = ""
+    oidc_req_token = ""
     if auth_mode == "oidc":
         token_file = Path(state["oidc_token_file"])
         oidc_url = _clean_env("ACTIONS_ID_TOKEN_REQUEST_URL")
         oidc_req_token = _clean_env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
         if oidc_req_token:
             sensitive.append(oidc_req_token)
-        if oidc_url and oidc_req_token:
-            jwt_val = _fetch_github_oidc_token(oidc_url, oidc_req_token, token_file)
-            sensitive.append(jwt_val)
-        elif token_file.is_file():
-            sensitive.append(token_file.read_text(encoding="utf-8").strip())
-        else:
+        if token_file.is_file():
+            existing_jwt = token_file.read_text(encoding="utf-8").strip()
+            if existing_jwt:
+                sensitive.append(existing_jwt)
+        elif not (oidc_url and oidc_req_token):
             raise ValueError("OIDC token file is missing and GitHub OIDC request variables are unavailable")
         child_env["AZURE_FEDERATED_TOKEN_FILE"] = str(token_file)
     elif auth_mode == "client_secret":
@@ -562,6 +600,27 @@ def sign_files(paths, *, retry_delays=(2.0, 5.0)):
         ]
         attempt = 0
         while True:
+            if auth_mode == "oidc":
+                if oidc_url and oidc_req_token:
+                    jwt_val = _fetch_github_oidc_token(oidc_url, oidc_req_token, token_file)
+                    if jwt_val not in sensitive:
+                        sensitive.append(jwt_val)
+                    exp = _jwt_expiration_epoch(jwt_val)
+                    if exp is not None and exp <= time.time():
+                        raise ValueError("Fetched GitHub OIDC token is already expired")
+                elif token_file.is_file():
+                    jwt_val = token_file.read_text(encoding="utf-8").strip()
+                    if not JWT_RE.fullmatch(jwt_val):
+                        raise ValueError("Staged OIDC token file does not contain a valid JWT")
+                    if jwt_val not in sensitive:
+                        sensitive.append(jwt_val)
+                    exp = _jwt_expiration_epoch(jwt_val)
+                    if exp is not None and exp <= time.time():
+                        raise ValueError(
+                            "OIDC federated token has expired and GitHub OIDC request variables are unavailable to renew it"
+                        )
+                else:
+                    raise ValueError("OIDC token file is missing and GitHub OIDC request variables are unavailable")
             try:
                 run_tool(cmd, redact=tuple(sensitive), env=child_env, timeout=180)
                 break
@@ -640,19 +699,22 @@ def main(argv=None):
     sub.add_parser("cleanup", help="Remove ephemeral OIDC tokens, secrets, and signing metadata")
 
     args = parser.parse_args(argv)
-    if args.command == "prepare":
-        prepare()
-    elif args.command == "sign":
-        sign_files(args.paths)
-    elif args.command == "verify":
-        verify_files(args.paths, require_signed=args.require_signed)
-    elif args.command == "cleanup":
-        cleanup()
+    try:
+        if args.command == "prepare":
+            prepare()
+        elif args.command == "sign":
+            sign_files(args.paths)
+        elif args.command == "verify":
+            verify_files(args.paths, require_signed=args.require_signed)
+        elif args.command == "cleanup":
+            cleanup()
+    except subprocess.SubprocessError:
+        print("::error::Windows signing failed: subprocess error (command details suppressed)", file=sys.stderr)
+        raise SystemExit(1) from None
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+    main()

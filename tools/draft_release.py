@@ -136,7 +136,10 @@ def _inspect_windows_authenticode(targets, command):
         raise ValueError("Unexpected Authenticode inspection output for Windows packages")
     statuses = [rec.get("status") for rec in records]
     if all(status == "NotSigned" for status in statuses):
-        return {"signing": "unsigned Windows development packages"}
+        return {
+            "authenticode_signed": False,
+            "signing": "unsigned Windows development packages",
+        }
     if any(status == "NotSigned" for status in statuses):
         raise ValueError("Inconsistent Windows Authenticode signing state across setup and runtime binaries")
     subjects = set()
@@ -161,6 +164,7 @@ def _inspect_windows_authenticode(targets, command):
     if len(subjects) != 1:
         raise ValueError("Mismatched Windows Authenticode signer subjects across Windows packages")
     return {
+        "authenticode_signed": True,
         "signing": "Authenticode-signed and timestamped Windows x64 installer and portable payload",
         "signer_subject": next(iter(subjects)),
         "signer_issuer": next(iter(issuers)),
@@ -283,6 +287,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         info.update({
             "bundle_id": MACOS_BUNDLE_ID,
             "minimum_os": DEFAULT_MIN_MACOS,
+            "notarized": stapled,
             "signing": macos_signing,
         })
     elif platform == "android":
@@ -344,6 +349,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError("Unexpected API redirect; credentials were not forwarded")
 
 
+class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self):
+        self.location = None
+
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        self.location = newurl
+        return None
+
+
 class GitHub:
     def __init__(self, repository, token):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or not token:
@@ -379,6 +393,58 @@ class GitHub:
         finally:
             if file:
                 payload.close()
+
+    def asset_bytes(self, asset, *, max_bytes=262144):
+        asset_id = asset.get("id")
+        if not isinstance(asset_id, int) or asset_id <= 0:
+            raise ValueError(f"Release asset has an invalid ID: {asset.get('name')}")
+        expected_digest = asset.get("digest", "")
+        expected_size = asset.get("size")
+        if (asset.get("state") != "uploaded" or not re.fullmatch("sha256:" + DIGEST, expected_digest)
+                or not isinstance(expected_size, int) or expected_size < 0 or expected_size > max_bytes):
+            raise ValueError(f"Release asset metadata is incomplete or oversized: {asset.get('name')}")
+
+        api_url = f"{self.base}/releases/assets/{asset_id}"
+        headers = {
+            "Authorization": "Bearer " + self.token,
+            "Accept": "application/octet-stream",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "MicDrop-draft-release",
+        }
+        capture = _CaptureRedirect()
+        raw = None
+        try:
+            req = urllib.request.Request(api_url, headers=headers, method="GET")
+            with urllib.request.build_opener(capture).open(req, timeout=60) as response:
+                raw = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308} or not capture.location:
+                raise ValueError(f"GitHub GET /releases/assets/{asset_id} failed with HTTP {error.code}") from None
+
+        if raw is None:
+            parsed_loc = urllib.parse.urlsplit(capture.location)
+            loc_host = (parsed_loc.hostname or "").lower()
+            if parsed_loc.scheme != "https" or not (
+                loc_host == "githubusercontent.com" or loc_host.endswith(".githubusercontent.com")
+            ):
+                raise ValueError("Unexpected redirect origin for GitHub release asset download")
+            try:
+                dl_req = urllib.request.Request(
+                    capture.location,
+                    headers={"User-Agent": "MicDrop-draft-release"},
+                    method="GET",
+                )
+                with urllib.request.build_opener(NoRedirect).open(dl_req, timeout=60) as response:
+                    raw = response.read(max_bytes + 1)
+            except urllib.error.HTTPError as error:
+                raise ValueError(f"Release asset download failed with HTTP {error.code}") from None
+
+        if len(raw) > max_bytes:
+            raise ValueError(f"Release asset exceeds size limit: {asset.get('name')}")
+        actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if len(raw) != expected_size or actual_digest != expected_digest:
+            raise ValueError(f"Downloaded release asset failed SHA-256 verification: {asset.get('name')}")
+        return raw
 
     def listing(self, path):
         result = []
@@ -425,13 +491,66 @@ def marker(run):
     return f"<!-- micdrop-draft-v1 source={run['head_sha']} run={run['id']} attempt={run['run_attempt']} -->"
 
 
-def release_body(run, identity, notes, complete):
-    status = "Packages verified; draft awaits human review." if complete else "INCOMPLETE: package uploads/verification are still pending. Do not publish."
+def _signing_summary_from_builds(builds):
+    if not isinstance(builds, dict):
+        raise ValueError("Verified build manifests are required to describe package signing")
+    for required_platform in ("windows", "linux", "macos", "android"):
+        if required_platform not in builds or not isinstance(builds[required_platform], dict):
+            raise ValueError(f"Missing verified {required_platform} build manifest")
+
+    win = builds["windows"]
+    win_signing = str(win.get("signing", ""))
+    win_signed = win.get("authenticode_signed")
+    if win_signed is True or (win_signed is None and bool(win.get("certificate_sha256"))):
+        win_clause = "Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped"
+    elif win_signed is False or "unsigned" in win_signing.lower():
+        win_clause = "Windows x64 packages are unsigned"
+    else:
+        raise ValueError(f"Unrecognized Windows signing metadata: {win_signing!r}")
+
+    mac = builds["macos"]
+    mac_signing = str(mac.get("signing", ""))
+    mac_notarized = mac.get("notarized")
+    if mac_notarized is True or (mac_notarized is None and "Apple-notarized" in mac_signing):
+        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized"
+    elif "Developer ID signed" in mac_signing:
+        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed (not notarized)"
+    elif mac_notarized is False or "ad-hoc" in mac_signing.lower():
+        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is ad-hoc signed without Apple notarization"
+    else:
+        raise ValueError(f"Unrecognized macOS signing metadata: {mac_signing!r}")
+
+    linux_signing = str(builds["linux"].get("signing", ""))
+    if "unsigned" not in linux_signing.lower():
+        raise ValueError(f"Unrecognized Linux signing metadata: {linux_signing!r}")
+    linux_clause = "Linux x64 is unsigned"
+
+    android_meta = builds["android"]
+    android_app_id = android_meta.get("application_id", "com.maskarauder.micdrop.dev")
+    android_clause = f"Android uses the existing development signer (`{android_app_id}`)"
+
+    if "ios" in builds:
+        ios_meta = builds["ios"]
+        ios_bundle_id = ios_meta.get("bundle_id", IOS_BUNDLE_ID)
+        ios_clause = (
+            f"the included iPhone `.ipa` (`{ios_bundle_id}`) is unsigned for Apple ID sideloading "
+            "(TestFlight builds are distributed via App Store Connect)"
+        )
+    else:
+        ios_clause = "no iPhone `.ipa` is attached to this draft (TestFlight builds are distributed via App Store Connect)"
+
+    return f"Package signing: {win_clause}; {mac_clause}; {linux_clause}; {android_clause}; {ios_clause}."
+
+
+def release_body(run, identity, notes, complete, *, builds=None):
+    if complete:
+        status = "Packages verified; draft awaits human review."
+        signing_summary = _signing_summary_from_builds(builds)
+    else:
+        status = "INCOMPLETE: package uploads/verification are still pending. Do not publish."
+        signing_summary = "Package signing: pending package verification during draft assembly."
     return (marker(run) + "\n\n" + status + "\n\n" + notes.strip() + "\n\n"
-            + "Package signing: Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped; "
-            + "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized; "
-            + "Linux x64 is unsigned; Android uses the existing development signer (`com.maskarauder.micdrop.dev`); "
-            + "any included iPhone `.ipa` (`com.maskarauder.micdrop`) is unsigned for Apple ID sideloading (TestFlight builds are distributed via App Store Connect). "
+            + signing_summary + " "
             + "First-party source is MPL-2.0; provide recipients with matching source and notices.\n\n"
             + f"Source: `{run['head_sha']}` · Android version code: `{identity['android_version_code']}`\n\n"
             + f"Verified build: {run['html_url']} (attempt {run['run_attempt']}).\n")
@@ -477,10 +596,35 @@ def upload(api, release_id, run, identity, path):
         raise ValueError("Uploaded asset failed GitHub digest verification")
 
 
+def _verified_build_manifests(api, by_name, prefix, run, identity, *, include_ios):
+    platforms = ["windows", "linux", "macos", "android"] + (["ios"] if include_ios else [])
+    builds = {}
+    for platform in platforms:
+        asset_name = f"{prefix}-{platform}-build.json"
+        raw = api.asset_bytes(by_name[asset_name])
+        try:
+            meta = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Unreadable build manifest JSON: {asset_name}") from exc
+        if not isinstance(meta, dict):
+            raise ValueError(f"Invalid build manifest structure: {asset_name}")
+        if (meta.get("schema") != 1
+                or meta.get("version") != identity["version"]
+                or meta.get("android_version_code") != identity["android_version_code"]
+                or meta.get("source_sha") != run["head_sha"]
+                or (platform != "ios" and (
+                    meta.get("build_run_id") != str(run["id"])
+                    or meta.get("build_attempt") != str(run["run_attempt"])
+                ))
+                or not isinstance(meta.get("signing"), str)
+                or not meta["signing"].strip()):
+            raise ValueError(f"Build manifest identity or signing metadata mismatch: {asset_name}")
+        builds[platform] = meta
+    return builds
+
+
 def finish(api, release_id, run, identity, notes, output):
     release = owned_draft(api, release_id, run, identity)
-    if release["body"] not in {release_body(run, identity, notes, False), release_body(run, identity, notes, True)}:
-        raise ValueError("Release notes were edited manually; refusing to overwrite them")
     prefix = "MicDrop-" + identity["version"]
     required = {
         prefix + suffix
@@ -504,7 +648,9 @@ def finish(api, release_id, run, identity, notes, output):
     if (len(names) != len(assets) or not required <= names or not names <= allowed
             or (bool(names & optional_ios) and not optional_ios <= names)):
         raise ValueError("Release has missing or unexpected assets")
-    packaged = required | (optional_ios if optional_ios <= names else set())
+    include_ios = optional_ios <= names
+    packaged = required | (optional_ios if include_ios else set())
+    by_name = {a["name"]: a for a in assets}
     files = []
     for asset in sorted(assets, key=lambda a: a["name"]):
         if asset["name"] not in packaged:
@@ -512,6 +658,10 @@ def finish(api, release_id, run, identity, notes, output):
         if asset.get("state") != "uploaded" or not re.fullmatch("sha256:" + DIGEST, asset.get("digest", "")):
             raise ValueError("Release asset is incomplete or has no SHA-256 digest")
         files.append({"name": asset["name"], "bytes": asset["size"], "sha256": asset["digest"][7:]})
+    builds = _verified_build_manifests(api, by_name, prefix, run, identity, include_ios=include_ios)
+    complete_body = release_body(run, identity, notes, True, builds=builds)
+    if release["body"] not in {release_body(run, identity, notes, False), complete_body}:
+        raise ValueError("Release notes were edited manually; refusing to overwrite them")
     output.mkdir(parents=True, exist_ok=False)
     manifest = output / "release-manifest.json"
     write_json(manifest, {"schema": 1, **identity, "source_sha": run["head_sha"], "build_run_id": str(run["id"]),
@@ -525,7 +675,7 @@ def finish(api, release_id, run, identity, notes, output):
     # GitHub resets a draft's pending tag to untagged-* if an update omits it.
     # Never change publication state, including if a human publishes during this request.
     updated = api.request("PATCH", f"/releases/{release_id}", {
-        "tag_name": "v" + identity["version"], "body": release_body(run, identity, notes, True)})
+        "tag_name": "v" + identity["version"], "body": complete_body})
     if updated.get("draft") is not True:
         raise ValueError("Release was published during finalization; its publication state was not changed")
     if updated.get("tag_name") != "v" + identity["version"]:

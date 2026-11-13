@@ -40,19 +40,39 @@ def _redact(text, sensitive):
     return result
 
 
+def _tool_display_name(str_args):
+    tool_name = Path(str_args[0]).name
+    if tool_name == "xcrun" and len(str_args) > 1:
+        return f"xcrun {str_args[1]}"
+    return tool_name
+
+
 def run_tool(arguments, *, redact=(), env=None, timeout=300):
     str_args = [str(a) for a in arguments]
-    proc = subprocess.run(
-        str_args,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
+    tool_name = _tool_display_name(str_args)
+    try:
+        proc = subprocess.run(
+            str_args,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        detail = _redact((err or out).strip(), redact)
+        if len(detail) > 2000:
+            detail = detail[-2000:]
+        msg = f"{tool_name} timed out after {timeout}s"
+        if detail:
+            msg = f"{msg}: {detail}"
+        raise RuntimeError(msg) from None
+    except OSError as exc:
+        detail = _redact(str(exc), redact)
+        raise RuntimeError(f"{tool_name} could not be started: {detail}") from None
+
     if proc.returncode != 0:
-        tool_name = Path(str_args[0]).name
-        if tool_name == "xcrun" and len(str_args) > 1:
-            tool_name = f"xcrun {str_args[1]}"
         detail = _redact((proc.stderr or proc.stdout or "").strip(), redact)
         if len(detail) > 2000:
             detail = detail[-2000:]
@@ -273,28 +293,19 @@ def prepare_macos():
     team_id = _clean_env("APPLE_TEAM_ID")
     p12_b64 = "".join(os.environ.get("APPLE_DEV_ID_P12_BASE64", "").split())
     p12_pw = os.environ.get("APPLE_DEV_ID_P12_PASSWORD", "")
-    api_any = any(
-        _clean_env(k)
-        for k in ("APPLE_API_PRIVATE_KEY_BASE64", "APPLE_API_KEY_ID", "APPLE_API_ISSUER_ID")
-    )
 
     work_dir = _make_work_dir()
     state = {"mode": "macos", "work_dir": str(work_dir), "signed": False, "notarized": False}
     try:
-        sign_vars = [
+        platform_vars = [
             name
             for name, val in (
-                ("APPLE_TEAM_ID", team_id),
                 ("APPLE_DEV_ID_P12_BASE64", p12_b64),
                 ("APPLE_DEV_ID_P12_PASSWORD", p12_pw),
             )
             if val
         ]
-        if not sign_vars:
-            if api_any:
-                # Validate API secrets if someone set only API secrets without Developer ID cert,
-                # or leave ad-hoc signing active when running without Developer ID secrets.
-                pass
+        if not platform_vars:
             _write_state_and_github_vars(
                 work_dir,
                 state,
@@ -306,6 +317,7 @@ def prepare_macos():
             )
             return
 
+        sign_vars = [*platform_vars, *(("APPLE_TEAM_ID",) if team_id else ())]
         if len(sign_vars) != 3:
             missing = sorted(
                 {"APPLE_TEAM_ID", "APPLE_DEV_ID_P12_BASE64", "APPLE_DEV_ID_P12_PASSWORD"} - set(sign_vars)
@@ -426,24 +438,27 @@ def notarize_macos(target, *, staple=False):
         if status != "Accepted":
             log_text = ""
             if sub_id:
-                log_proc = subprocess.run(
-                    [
-                        "xcrun",
-                        "notarytool",
-                        "log",
-                        sub_id,
-                        "--key",
-                        state["api_key_path"],
-                        "--key-id",
-                        state["api_key_id"],
-                        "--issuer",
-                        state["api_issuer_id"],
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                log_text = (log_proc.stdout or log_proc.stderr or "").strip()
+                try:
+                    log_proc = subprocess.run(
+                        [
+                            "xcrun",
+                            "notarytool",
+                            "log",
+                            sub_id,
+                            "--key",
+                            state["api_key_path"],
+                            "--key-id",
+                            state["api_key_id"],
+                            "--issuer",
+                            state["api_issuer_id"],
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    log_text = (log_proc.stdout or log_proc.stderr or "").strip()
+                except (subprocess.TimeoutExpired, OSError):
+                    log_text = "(timed out or failed retrieving notarytool log)"
             raise RuntimeError(
                 f"Apple notarization rejected {target.name} (status={status!r}, id={sub_id}):\n{log_text}"
             )
@@ -515,17 +530,16 @@ def prepare_ios(bundle_id):
         "installed_profiles": [],
     }
     try:
-        sign_vars = [
+        platform_vars = [
             name
             for name, val in (
-                ("APPLE_TEAM_ID", team_id),
                 ("APPLE_DIST_P12_BASE64", p12_b64),
                 ("APPLE_DIST_P12_PASSWORD", p12_pw),
                 ("APPLE_IOS_PROVISION_PROFILE_BASE64", prof_b64),
             )
             if val
         ]
-        if not sign_vars:
+        if not platform_vars:
             _write_state_and_github_vars(
                 work_dir,
                 state,
@@ -537,6 +551,7 @@ def prepare_ios(bundle_id):
             )
             return
 
+        sign_vars = [*platform_vars, *(("APPLE_TEAM_ID",) if team_id else ())]
         if len(sign_vars) != 4:
             missing = sorted(
                 {
@@ -576,9 +591,12 @@ def prepare_ios(bundle_id):
         prof_uuid = prof_plist.get("UUID", "")
         prof_name = prof_plist.get("Name", "")
         prof_teams = prof_plist.get("TeamIdentifier", [])
+        raw_prefixes = prof_plist.get("ApplicationIdentifierPrefix")
         entitlements = prof_plist.get("Entitlements", {})
+        if not isinstance(entitlements, dict):
+            raise ValueError("Provisioning profile Entitlements is invalid")
         app_identifier = entitlements.get("application-identifier", "")
-        expected_app_id = f"{team_id}.{bundle_id}"
+        ent_team = entitlements.get("com.apple.developer.team-identifier")
 
         if not isinstance(prof_uuid, str) or not PROFILE_UUID_RE.fullmatch(prof_uuid):
             raise ValueError("Provisioning profile has an invalid UUID")
@@ -586,9 +604,26 @@ def prepare_ios(bundle_id):
             raise ValueError("Provisioning profile is missing Name")
         if not isinstance(prof_teams, list) or team_id not in prof_teams:
             raise ValueError(f"Provisioning profile TeamIdentifier does not match {team_id}")
-        if app_identifier != expected_app_id:
+        if ent_team is not None and ent_team != team_id:
             raise ValueError(
-                f"Provisioning profile application-identifier is {app_identifier!r}; expected {expected_app_id!r}"
+                f"Provisioning profile com.apple.developer.team-identifier is {ent_team!r}; expected {team_id!r}"
+            )
+        if raw_prefixes is not None:
+            if (
+                not isinstance(raw_prefixes, list)
+                or not raw_prefixes
+                or any(not isinstance(p, str) or not TEAM_ID_RE.fullmatch(p) for p in raw_prefixes)
+            ):
+                raise ValueError("Provisioning profile has an invalid ApplicationIdentifierPrefix")
+            allowed_prefixes = list(dict.fromkeys(raw_prefixes))
+        else:
+            allowed_prefixes = [team_id]
+
+        allowed_app_ids = [f"{prefix}.{bundle_id}" for prefix in allowed_prefixes]
+        if not isinstance(app_identifier, str) or app_identifier not in allowed_app_ids:
+            expected_desc = " or ".join(repr(item) for item in allowed_app_ids)
+            raise ValueError(
+                f"Provisioning profile application-identifier is {app_identifier!r}; expected {expected_desc}"
             )
         if entitlements.get("get-task-allow") is True:
             raise ValueError(
@@ -784,7 +819,10 @@ def main(argv=None):
             upload_testflight(args.ipa)
         elif args.command == "cleanup":
             cleanup()
-    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    except subprocess.SubprocessError:
+        sys.stderr.write("Apple signing failed: subprocess error (command details suppressed)\n")
+        raise SystemExit(1) from None
+    except (ValueError, OSError, RuntimeError) as exc:
         sys.stderr.write(f"Apple signing failed: {exc}\n")
         raise SystemExit(1) from None
 

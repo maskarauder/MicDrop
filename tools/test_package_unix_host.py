@@ -30,6 +30,17 @@ def fake_elf_x64(e_type):
     return header + b"\x00" * (64 - len(header))
 
 
+CLI_HOST_NOTICES = (
+    "LICENSE",
+    "NOTICE",
+    "QR-CODE-NOTICE.txt",
+    "DISCOVERY-NOTICES.txt",
+    "WEBSOCKET-NOTICE.txt",
+    "WEBRTC-NOTICE.txt",
+    "WEBRTC-VERSIONS.txt",
+)
+
+
 class PackageUnixHostTests(unittest.TestCase):
     def _populate_stage(self, stage_dir: Path, platform: str):
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -48,8 +59,23 @@ class PackageUnixHostTests(unittest.TestCase):
             )
         exe.chmod(0o755)
         lib.chmod(0o755)
-        for notice in package_unix_host.REQUIRED_NOTICES:
+        for notice in CLI_HOST_NOTICES:
             (stage_dir / notice).write_text(f"{notice}\n", encoding="utf-8")
+
+    def test_cli_host_packages_do_not_require_or_allow_gui_app_icon(self):
+        self.assertIn("AppIcon.icns", package_unix_host.macos_app_bundle.REQUIRED_APP_RESOURCES)
+        self.assertNotIn("AppIcon.icns", package_unix_host.REQUIRED_NOTICES)
+        self.assertEqual(set(package_unix_host.REQUIRED_NOTICES), set(CLI_HOST_NOTICES))
+        for platform in ("linux-x64", "macos-arm64"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
+                stage = Path(tmp) / "stage"
+                self._populate_stage(stage, platform)
+                self.assertNotIn("AppIcon.icns", package_unix_host.expected_filenames(platform))
+                package_unix_host.check_stage_directory(stage, platform=platform)
+
+                (stage / "AppIcon.icns").write_bytes(b"icns")
+                with self.assertRaisesRegex(ValueError, "unexpected files.*AppIcon\\.icns"):
+                    package_unix_host.check_stage_directory(stage, platform=platform)
 
     def test_linux_and_macos_tarballs_preserve_executable_permissions_after_chmod_strip(self):
         for platform, top_dir in (

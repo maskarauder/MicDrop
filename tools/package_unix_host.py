@@ -35,7 +35,7 @@ PLATFORMS = {
     },
 }
 
-REQUIRED_NOTICES = macos_app_bundle.REQUIRED_RESOURCES
+REQUIRED_NOTICES = macos_app_bundle.REQUIRED_NOTICES
 
 
 def reject_link(path):

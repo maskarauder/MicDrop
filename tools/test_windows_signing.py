@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Unit tests for tools/windows_signing.py."""
 
+import base64
 import hashlib
 import io
 import json
@@ -24,8 +25,21 @@ CLIENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 ENDPOINT = "https://eus.codesigning.azure.net/"
 ACCOUNT = "micdrop-signing"
 PROFILE = "micdrop-public"
-FAKE_JWT_1 = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJnaXRodWIifQ.c2lnbmF0dXJlMQ"
-FAKE_JWT_2 = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZWZyZXNoIn0.c2lnbmF0dXJlMg"
+
+
+def _make_jwt(sub, *, exp=None):
+    header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode("ascii")
+    claims = {"sub": sub}
+    if exp is not None:
+        claims["exp"] = exp
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode("utf-8")).rstrip(b"=").decode("ascii")
+    sig = base64.urlsafe_b64encode(f"sig-{sub}-{exp}".encode("utf-8")).rstrip(b"=").decode("ascii")
+    return f"{header}.{payload}.{sig}"
+
+
+FAKE_JWT_1 = _make_jwt("github-prepare")
+FAKE_JWT_2 = _make_jwt("github-attempt-1")
+FAKE_JWT_3 = _make_jwt("github-attempt-2")
 
 
 def _build_nupkg_bytes(entries):
@@ -142,7 +156,10 @@ class WindowsSigningTests(unittest.TestCase):
             ({"AZURE_SIGNING_ENDPOINT": "https://evil.example.com"}, "AZURE_SIGNING_ENDPOINT"),
             ({"AZURE_SIGNING_ENDPOINT": "https://eus.codesigning.azure.net/extra"}, "AZURE_SIGNING_ENDPOINT"),
             ({"AZURE_SIGNING_ACCOUNT": "../bad"}, "AZURE_SIGNING_ACCOUNT"),
+            ({"AZURE_SIGNING_ACCOUNT": "a" * 64}, "AZURE_SIGNING_ACCOUNT"),
             ({"AZURE_SIGNING_CERT_PROFILE": "bad;profile"}, "AZURE_SIGNING_CERT_PROFILE"),
+            ({"AZURE_SIGNING_CERT_PROFILE": "p" * 101}, "AZURE_SIGNING_CERT_PROFILE"),
+            ({"AZURE_SIGNING_CERT_PROFILE": "ab"}, "AZURE_SIGNING_CERT_PROFILE"),
             ({"AZURE_SIGNING_PUBLISHER": 'Bad"Publisher'}, "AZURE_SIGNING_PUBLISHER"),
             ({}, "OIDC.*AZURE_CLIENT_SECRET"),
         ]
@@ -167,9 +184,42 @@ class WindowsSigningTests(unittest.TestCase):
                     windows_signing.prepare(repo_root=self.repo_root)
         self.assertEqual(list(self.runner_temp.iterdir()), [])
 
+    def test_long_certificate_profile_names_up_to_100_chars_are_accepted(self):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args, 0, stdout="Microsoft.NETCore.App 8.0.11 [C:\\dotnet]\n", stderr=""
+            )
+
+        def fake_urlopen(req, timeout=120):
+            return _FakeHTTPResponse(self.nupkg_payloads[req.full_url])
+
+        for account_len, profile_len in ((63, 64), (63, 100)):
+            long_account = "a" + ("b" * (account_len - 2)) + "c"
+            long_profile = "p" + ("q" * (profile_len - 2)) + "r"
+            env = self._base_env(
+                AZURE_TENANT_ID=TENANT_ID,
+                AZURE_CLIENT_ID=CLIENT_ID,
+                AZURE_CLIENT_SECRET="secret-val",
+                AZURE_SIGNING_ENDPOINT=ENDPOINT,
+                AZURE_SIGNING_ACCOUNT=long_account,
+                AZURE_SIGNING_CERT_PROFILE=long_profile,
+            )
+            with self.subTest(account_len=account_len, profile_len=profile_len), patch.dict(
+                os.environ, env, clear=False
+            ), patch.object(windows_signing, "SDK_PACKAGE", self.sdk_pkg), patch.object(
+                windows_signing, "DLIB_PACKAGE", self.dlib_pkg
+            ), patch("urllib.request.urlopen", side_effect=fake_urlopen), patch(
+                "subprocess.run", side_effect=fake_run
+            ):
+                state = windows_signing.prepare(repo_root=self.repo_root)
+                self.assertEqual(state["account"], long_account)
+                self.assertEqual(state["cert_profile"], long_profile)
+                os.environ["MICDROP_WINDOWS_SIGNING_STATE"] = str(Path(state["work_dir"]) / "state.json")
+                windows_signing.cleanup()
+
     def test_oidc_prepare_refresh_sign_verify_and_cleanup(self):
         oidc_requests = []
-        jwt_tokens = [FAKE_JWT_1, FAKE_JWT_2]
+        jwt_tokens = [FAKE_JWT_1, FAKE_JWT_2, FAKE_JWT_3]
 
         class FakeOpener:
             def open(self, req, timeout=30):
@@ -178,7 +228,7 @@ class WindowsSigningTests(unittest.TestCase):
                 return _FakeHTTPResponse(json.dumps({"value": token}).encode("utf-8"))
 
         tool_calls = []
-        sign_attempts = {"count": 0}
+        tokens_seen_by_signtool = []
 
         def fake_run(args, capture_output=True, text=True, env=None, timeout=180):
             str_args = [str(a) for a in args]
@@ -188,10 +238,11 @@ class WindowsSigningTests(unittest.TestCase):
                     str_args, 0, stdout="Microsoft.NETCore.App 8.0.11 [C:\\dotnet]\n", stderr=""
                 )
             if str_args[1] == "sign":
-                sign_attempts["count"] += 1
-                if sign_attempts["count"] == 1:
+                staged_token = Path(env["AZURE_FEDERATED_TOKEN_FILE"]).read_text(encoding="utf-8")
+                tokens_seen_by_signtool.append(staged_token)
+                if len(tokens_seen_by_signtool) == 1:
                     return subprocess.CompletedProcess(
-                        str_args, 1, stdout="", stderr=f"Transient TSA timeout ({FAKE_JWT_2})"
+                        str_args, 1, stdout="", stderr=f"Transient TSA timeout ({staged_token})"
                     )
                 return subprocess.CompletedProcess(str_args, 0, stdout="Successfully signed\n", stderr="")
             if str_args[1] == "verify":
@@ -238,11 +289,12 @@ class WindowsSigningTests(unittest.TestCase):
             os.environ["MICDROP_WINDOWS_SIGNING_STATE"] = str(Path(state["work_dir"]) / "state.json")
             windows_signing.sign_files([target], retry_delays=(0.0,))
 
-            # OIDC token was fetched once in prepare and refreshed once in sign_files.
-            self.assertEqual(len(oidc_requests), 2)
+            # OIDC token was fetched once in prepare and refreshed before EACH signing attempt (2 attempts).
+            self.assertEqual(len(oidc_requests), 3)
+            self.assertEqual(tokens_seen_by_signtool, [FAKE_JWT_2, FAKE_JWT_3])
             self.assertIn("audience=api%3A%2F%2FAzureADTokenExchange", oidc_requests[0][0])
             self.assertEqual(oidc_requests[0][1], "Bearer gh-oidc-req-secret")
-            self.assertEqual(Path(state["oidc_token_file"]).read_text(encoding="utf-8"), FAKE_JWT_2)
+            self.assertEqual(Path(state["oidc_token_file"]).read_text(encoding="utf-8"), FAKE_JWT_3)
 
             # Verify child env passed to signtool.exe had AZURE_FEDERATED_TOKEN_FILE and no AZURE_CLIENT_SECRET.
             sign_call_args, sign_env = [c for c in tool_calls if len(c[0]) > 1 and c[0][1] == "sign"][-1]
@@ -256,8 +308,94 @@ class WindowsSigningTests(unittest.TestCase):
             windows_signing.cleanup()
             self.assertFalse(Path(state["work_dir"]).exists())
 
-    def test_client_secret_mode_and_error_redaction(self):
+    def test_oidc_refreshes_expired_token_across_slow_retries_and_rejects_expired_staged_jwt(self):
+        clock = {"now": 1_700_000_000.0}
+        minted = []
+
+        class ClockOpener:
+            def open(self, req, timeout=30):
+                idx = len(minted) + 1
+                # GitHub Actions OIDC assertions expire after 5 minutes (300s).
+                jwt_token = _make_jwt(f"attempt-{idx}", exp=int(clock["now"]) + 300)
+                minted.append(jwt_token)
+                return _FakeHTTPResponse(json.dumps({"value": jwt_token}).encode("utf-8"))
+
+        sign_calls = []
+
+        def fake_run(args, capture_output=True, text=True, env=None, timeout=180):
+            str_args = [str(a) for a in args]
+            if Path(str_args[0]).name == "dotnet":
+                return subprocess.CompletedProcess(
+                    str_args, 0, stdout="Microsoft.NETCore.App 8.0.11 [C:\\dotnet]\n", stderr=""
+                )
+            if str_args[1] == "sign":
+                token = Path(env["AZURE_FEDERATED_TOKEN_FILE"]).read_text(encoding="utf-8")
+                exp = windows_signing._jwt_expiration_epoch(token)
+                self.assertIsNotNone(exp)
+                # Every SignTool attempt must receive a fresh, unexpired OIDC token!
+                self.assertGreater(exp, clock["now"], "SignTool was given an expired OIDC token")
+                sign_calls.append(token)
+                if len(sign_calls) == 1:
+                    # Simulate a slow transient timeout that outlives the 5-minute OIDC assertion.
+                    clock["now"] += 360.0
+                    return subprocess.CompletedProcess(str_args, 1, stdout="", stderr="slow transient failure")
+                clock["now"] += 45.0
+                return subprocess.CompletedProcess(str_args, 0, stdout="Successfully signed\n", stderr="")
+            if str_args[1] == "verify":
+                return subprocess.CompletedProcess(
+                    str_args, 0, stdout="Successfully verified\nNumber of errors: 0\n", stderr=""
+                )
+            raise AssertionError(f"Unexpected call: {str_args}")
+
+        def fake_urlopen(req, timeout=120):
+            return _FakeHTTPResponse(self.nupkg_payloads[req.full_url])
+
+        exe = self.root / "MicDrop.exe"
+        dll = self.root / "micdrop_rtc.dll"
+        exe.write_bytes(b"MZ-exe")
+        dll.write_bytes(b"MZ-dll")
+
+        env = self._base_env(
+            AZURE_TENANT_ID=TENANT_ID,
+            AZURE_CLIENT_ID=CLIENT_ID,
+            AZURE_SIGNING_ENDPOINT=ENDPOINT,
+            AZURE_SIGNING_ACCOUNT=ACCOUNT,
+            AZURE_SIGNING_CERT_PROFILE=PROFILE,
+            ACTIONS_ID_TOKEN_REQUEST_URL="https://token.actions.githubusercontent.com/id?job=1",
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN="gh-oidc-req-secret",
+        )
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            windows_signing, "SDK_PACKAGE", self.sdk_pkg
+        ), patch.object(windows_signing, "DLIB_PACKAGE", self.dlib_pkg), patch(
+            "urllib.request.build_opener", return_value=ClockOpener()
+        ), patch(
+            "urllib.request.urlopen", side_effect=fake_urlopen
+        ), patch(
+            "subprocess.run", side_effect=fake_run
+        ), patch(
+            "windows_signing.time.time", side_effect=lambda: clock["now"]
+        ), patch(
+            "windows_signing.time.sleep", side_effect=lambda secs: clock.__setitem__("now", clock["now"] + secs)
+        ):
+            state = windows_signing.prepare(repo_root=self.repo_root)
+            os.environ["MICDROP_WINDOWS_SIGNING_STATE"] = str(Path(state["work_dir"]) / "state.json")
+            windows_signing.sign_files([exe, dll], retry_delays=(5.0,))
+            # 1 prepare + 2 attempts for exe + 1 attempt for dll = 4 distinct minted tokens.
+            self.assertEqual(len(minted), 4)
+            self.assertEqual(len(set(sign_calls)), 3)
+
+            # Without GitHub OIDC request vars, an expired pre-staged JWT is rejected before SignTool runs.
+            os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] = ""
+            os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = ""
+            clock["now"] += 1000.0
+            with self.assertRaisesRegex(ValueError, "expired"):
+                windows_signing.sign_files([exe], retry_delays=())
+
+            windows_signing.cleanup()
+
+    def test_client_secret_mode_and_error_redaction_including_timeout(self):
         secret_value = "entra-client-secret-xyz-987"
+        mode = {"timeout": False}
 
         def fake_run(args, capture_output=True, text=True, env=None, timeout=180):
             str_args = [str(a) for a in args]
@@ -268,6 +406,12 @@ class WindowsSigningTests(unittest.TestCase):
             if str_args[1] == "sign":
                 self.assertEqual(env.get("AZURE_CLIENT_SECRET"), secret_value)
                 self.assertNotIn("AZURE_FEDERATED_TOKEN_FILE", env)
+                if mode["timeout"]:
+                    raise subprocess.TimeoutExpired(
+                        cmd=str_args,
+                        timeout=timeout,
+                        stderr=f"Timed out with secret={secret_value}",
+                    )
                 return subprocess.CompletedProcess(
                     str_args, 1, stdout=f"Auth error with secret={secret_value}", stderr=""
                 )
@@ -307,6 +451,16 @@ class WindowsSigningTests(unittest.TestCase):
                 windows_signing.sign_files([target], retry_delays=())
             self.assertNotIn(secret_value, str(ctx.exception))
             self.assertIn("[REDACTED]", str(ctx.exception))
+
+            mode["timeout"] = True
+            stderr_buf = io.StringIO()
+            with patch("sys.stderr", stderr_buf), patch("windows_signing.time.sleep"):
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    windows_signing.main(["sign", str(target)])
+            self.assertEqual(exit_ctx.exception.code, 1)
+            self.assertIn("signtool.exe timed out", stderr_buf.getvalue())
+            self.assertIn("[REDACTED]", stderr_buf.getvalue())
+            self.assertNotIn(secret_value, stderr_buf.getvalue())
 
             windows_signing.cleanup()
             self.assertFalse(Path(state["work_dir"]).exists())

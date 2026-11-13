@@ -43,8 +43,7 @@ FAT_HEADER = struct.Struct(">II")
 FAT_ARCH = struct.Struct(">iiIII")
 FAT_ARCH_64 = struct.Struct(">iiQQII")
 
-REQUIRED_RESOURCES = (
-    "AppIcon.icns",
+REQUIRED_NOTICES = (
     "LICENSE",
     "NOTICE",
     "QR-CODE-NOTICE.txt",
@@ -53,6 +52,13 @@ REQUIRED_RESOURCES = (
     "WEBRTC-NOTICE.txt",
     "WEBRTC-VERSIONS.txt",
 )
+
+REQUIRED_APP_RESOURCES = (
+    "AppIcon.icns",
+    *REQUIRED_NOTICES,
+)
+
+REQUIRED_RESOURCES = REQUIRED_APP_RESOURCES
 
 USAGE_KEYS = (
     "NSAudioCaptureUsageDescription",
@@ -394,7 +400,7 @@ def check_app_directory(
             f"Contents/Frameworks/libmicdrop_rtc.dylib minimum macOS {version_text(dylib_min)} exceeds {minimum_os}"
         )
 
-    for resource in REQUIRED_RESOURCES:
+    for resource in REQUIRED_APP_RESOURCES:
         res_path = app_dir / "Contents" / "Resources" / resource
         if not res_path.is_file() or res_path.stat().st_size == 0:
             raise ValueError(f"MicDrop.app is missing non-empty Contents/Resources/{resource}")
@@ -483,7 +489,7 @@ def check_app_zip(
                 f"{dylib_name} minimum macOS {version_text(dylib_min)} exceeds {minimum_os}"
             )
 
-        for resource in REQUIRED_RESOURCES:
+        for resource in REQUIRED_APP_RESOURCES:
             res_name = f"MicDrop.app/Contents/Resources/{resource}"
             if res_name not in by_name or by_name[res_name].file_size == 0:
                 raise ValueError(f"Archive is missing non-empty {res_name}")
