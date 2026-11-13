@@ -1646,12 +1646,15 @@ func TestLinuxDesktopTrayCleanupDestroysMenuBeforeIndicator(t *testing.T) {
 			t.Fatalf("cycle %d: runWindow startup timed out", cycle)
 		}
 
-		var liveDuring int
+		var liveDuring, critDuring int
 		uiDo(func() {
-			liveDuring, _ = trayCleanupStatsForTest()
+			liveDuring, _, critDuring = trayCleanupStatsForTest()
 		})
 		if liveDuring != 2 {
 			t.Fatalf("cycle %d: expected 2 live tray GObjects (indicator + sunk GtkMenu) while running, got %d", cycle, liveDuring)
+		}
+		if critDuring != 0 {
+			t.Fatalf("cycle %d: unexpected %d GLib/GTK CRITICAL log(s) before cleanup", cycle, critDuring)
 		}
 
 		uiDo(func() { triggerControlForTest(idExit, 0) })
@@ -1664,20 +1667,26 @@ func TestLinuxDesktopTrayCleanupDestroysMenuBeforeIndicator(t *testing.T) {
 			t.Fatalf("cycle %d: runWindow did not finish cleanup", cycle)
 		}
 
-		var liveAfter int
-		var destroyedWhileAlive bool
+		var liveAfter, critAfter int
+		var destroyedBeforeIndicator bool
 		done := make(chan struct{})
 		linuxMainThread <- func() {
-			liveAfter, destroyedWhileAlive = trayCleanupStatsForTest()
+			liveAfter, destroyedBeforeIndicator, critAfter = trayCleanupStatsForTest()
 			close(done)
 		}
 		<-done
 
-		if !destroyedWhileAlive {
-			t.Fatalf("cycle %d: tray GtkMenu finalized before gtk_widget_destroy ran", cycle)
+		if critAfter != 0 {
+			t.Errorf("cycle %d: observed %d GLib/GTK CRITICAL assertion(s) during tray cleanup", cycle, critAfter)
+		}
+		if !destroyedBeforeIndicator {
+			t.Errorf("cycle %d: explicit gtk_widget_destroy did not run while tray GtkMenu and indicator were still alive", cycle)
 		}
 		if liveAfter != 0 {
-			t.Fatalf("cycle %d: leaked %d tray GObject(s) after md_app_cleanup", cycle, liveAfter)
+			t.Errorf("cycle %d: leaked %d tray GObject(s) after md_app_cleanup", cycle, liveAfter)
+		}
+		if t.Failed() {
+			t.FailNow()
 		}
 	}
 }

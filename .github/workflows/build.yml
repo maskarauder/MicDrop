@@ -225,7 +225,7 @@ jobs:
             DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
               xvfb xauth fonts-dejavu-core adwaita-icon-theme "$GTK_PKG"
           fi
-          xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
+          G_DEBUG=fatal-criticals xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
       - name: Retain Linux desktop UI preview
         if: runner.os == 'Linux'
         uses: ./.github/actions/store-artifact

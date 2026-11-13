@@ -105,11 +105,14 @@ enum {
   MD_G_DBUS_CALL_FLAGS_NONE = 0,
   MD_G_DBUS_CALL_FLAGS_NO_AUTO_START = 1,
   MD_G_DBUS_CONN_FLAGS_SESSION_CLIENT = 9,
+  MD_G_LOG_LEVEL_CRITICAL = 8,
   MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS = 0,
   MD_APP_INDICATOR_STATUS_ACTIVE = 1,
 };
 
 typedef void (*GDestroyNotify)(gpointer data);
+typedef void (*MdLogFunc)(const char* log_domain, int log_level, const char* message, gpointer user_data);
+typedef int (*MdLogWriterFunc)(int log_level, const void* fields, size_t n_fields, gpointer user_data);
 
 typedef struct {
   int loaded;
@@ -137,6 +140,10 @@ typedef struct {
   gboolean (*g_variant_get_boolean)(void* value);
   gboolean (*g_variant_is_of_type)(void* value, const void* type);
   const void* (*g_variant_type_checked_)(const char* type_string);
+  MdLogFunc (*g_log_set_default_handler)(MdLogFunc log_func, gpointer user_data);
+  void (*g_log_default_handler)(const char* log_domain, int log_level, const char* message, gpointer unused_data);
+  void (*g_log_set_writer_func)(MdLogWriterFunc func, gpointer user_data, GDestroyNotify user_data_free);
+  int (*g_log_writer_default)(int log_level, const void* fields, size_t n_fields, gpointer user_data);
 
   // GObject
   gulong (*g_signal_connect_data)(gpointer instance, const char* detailed_signal, GCallback c_handler,
@@ -416,6 +423,10 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(glib, g_variant_get_boolean);
   LOAD_SYM(glib, g_variant_is_of_type);
   LOAD_SYM(glib, g_variant_type_checked_);
+  *(void**)(&gGtk.g_log_set_default_handler) = dlsym(gGtk.glib, "g_log_set_default_handler");
+  *(void**)(&gGtk.g_log_default_handler) = dlsym(gGtk.glib, "g_log_default_handler");
+  *(void**)(&gGtk.g_log_set_writer_func) = dlsym(gGtk.glib, "g_log_set_writer_func");
+  *(void**)(&gGtk.g_log_writer_default) = dlsym(gGtk.glib, "g_log_writer_default");
 
   LOAD_SYM(gobject, g_signal_connect_data);
   LOAD_SYM(gobject, g_signal_handlers_disconnect_matched);
@@ -692,8 +703,29 @@ static int gTestHostOverride = -1;
 static char* gTestDBusAddr = NULL;
 static int gTestAllowModals = 0;
 static int gLiveTrayObjects = 0;
+static int gTrayIndicatorFinalized = 0;
 static int gTrayMenuFinalized = 0;
-static int gTrayMenuDestroyedWhileAlive = 0;
+static int gTrayMenuDestroyedBeforeIndicator = 0;
+static int gGtkCriticalCount = 0;
+
+static void mdLogDefaultHandler(const char* log_domain, int log_level, const char* message, gpointer user_data) {
+  if ((log_level & MD_G_LOG_LEVEL_CRITICAL) != 0) {
+    __atomic_add_fetch(&gGtkCriticalCount, 1, __ATOMIC_SEQ_CST);
+  }
+  if (gGtk.g_log_default_handler != NULL) {
+    gGtk.g_log_default_handler(log_domain, log_level, message, user_data);
+  }
+}
+
+static int mdLogWriter(int log_level, const void* fields, size_t n_fields, gpointer user_data) {
+  if ((log_level & MD_G_LOG_LEVEL_CRITICAL) != 0) {
+    __atomic_add_fetch(&gGtkCriticalCount, 1, __ATOMIC_SEQ_CST);
+  }
+  if (gGtk.g_log_writer_default != NULL) {
+    return gGtk.g_log_writer_default(log_level, fields, n_fields, user_data);
+  }
+  return 1;
+}
 
 static char* mdDupStr(const char* s) {
   if (s == NULL) {
@@ -1223,16 +1255,10 @@ static void mdOnTrayObjectFinalized(gpointer data, gpointer where_the_object_was
   (void)where_the_object_was;
   if ((intptr_t)data == 1) {
     __atomic_store_n(&gTrayMenuFinalized, 1, __ATOMIC_SEQ_CST);
+  } else {
+    __atomic_store_n(&gTrayIndicatorFinalized, 1, __ATOMIC_SEQ_CST);
   }
   __atomic_sub_fetch(&gLiveTrayObjects, 1, __ATOMIC_SEQ_CST);
-}
-
-static void mdOnTrayMenuDestroy(void* widget, gpointer user_data) {
-  (void)widget;
-  (void)user_data;
-  if (__atomic_load_n(&gTrayMenuFinalized, __ATOMIC_SEQ_CST) == 0) {
-    __atomic_store_n(&gTrayMenuDestroyedWhileAlive, 1, __ATOMIC_SEQ_CST);
-  }
 }
 
 static void mdTrackTrayObject(void* obj, int is_menu) {
@@ -1246,8 +1272,10 @@ static void mdSetupTray(void) {
   gApp.tray_available = 0;
   gApp.indicator_is_real = 0;
   gApp.test_indicator_present = (!gApp.headless_test && gTestSimIndicator != 0) ? 1 : 0;
+  __atomic_store_n(&gTrayIndicatorFinalized, 0, __ATOMIC_SEQ_CST);
   __atomic_store_n(&gTrayMenuFinalized, 0, __ATOMIC_SEQ_CST);
-  __atomic_store_n(&gTrayMenuDestroyedWhileAlive, 0, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&gTrayMenuDestroyedBeforeIndicator, 0, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&gGtkCriticalCount, 0, __ATOMIC_SEQ_CST);
   if (gApp.headless_test) {
     return;
   }
@@ -1273,7 +1301,6 @@ static void mdSetupTray(void) {
 
     void* menu = gGtk.gtk_menu_new();
     mdTrackTrayObject(menu, 1);
-    gGtk.g_signal_connect_data(menu, "destroy", (GCallback)mdOnTrayMenuDestroy, NULL, NULL, 0);
 
     void* header = gGtk.gtk_menu_item_new_with_label("MicDrop · Stopped");
     gGtk.gtk_widget_set_sensitive(header, 0);
@@ -1343,6 +1370,12 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
                  "GTK 3 could not connect to the display server; verify DISPLAY or WAYLAND_DISPLAY");
       }
       return 0;
+    }
+    if (gGtk.g_log_set_default_handler != NULL && gGtk.g_log_default_handler != NULL) {
+      gGtk.g_log_set_default_handler(mdLogDefaultHandler, NULL);
+    }
+    if (gGtk.g_log_set_writer_func != NULL && gGtk.g_log_writer_default != NULL) {
+      gGtk.g_log_set_writer_func(mdLogWriter, NULL, NULL);
     }
     gGtk.gtk_window_set_default_icon_name("audio-input-microphone");
     gApp.gtk_inited = 1;
@@ -1546,7 +1579,12 @@ void md_app_cleanup(void) {
     gApp.qr_size = 0;
   }
   if (gApp.tray_menu != NULL) {
+    int menu_alive = (__atomic_load_n(&gTrayMenuFinalized, __ATOMIC_SEQ_CST) == 0);
+    int ind_alive = (__atomic_load_n(&gTrayIndicatorFinalized, __ATOMIC_SEQ_CST) == 0);
     gGtk.gtk_widget_destroy(gApp.tray_menu);
+    if (menu_alive && ind_alive) {
+      __atomic_store_n(&gTrayMenuDestroyedBeforeIndicator, 1, __ATOMIC_SEQ_CST);
+    }
     gApp.tray_menu = NULL;
     gApp.tray_header_item = NULL;
     gApp.tray_toggle_item = NULL;
@@ -2495,15 +2533,18 @@ int md_test_live_modal_objects(void) {
   return __atomic_load_n(&gLiveModalObjects, __ATOMIC_SEQ_CST);
 }
 
-void md_test_tray_cleanup_stats(int* out_live_objects, int* out_destroyed_while_alive) {
+void md_test_tray_cleanup_stats(int* out_live_objects, int* out_destroyed_before_indicator, int* out_critical_logs) {
   if (gGtk.loaded && gApp.gtk_inited) {
     mdFlushEvents();
   }
   if (out_live_objects != NULL) {
     *out_live_objects = __atomic_load_n(&gLiveTrayObjects, __ATOMIC_SEQ_CST);
   }
-  if (out_destroyed_while_alive != NULL) {
-    *out_destroyed_while_alive = __atomic_load_n(&gTrayMenuDestroyedWhileAlive, __ATOMIC_SEQ_CST);
+  if (out_destroyed_before_indicator != NULL) {
+    *out_destroyed_before_indicator = __atomic_load_n(&gTrayMenuDestroyedBeforeIndicator, __ATOMIC_SEQ_CST);
+  }
+  if (out_critical_logs != NULL) {
+    *out_critical_logs = __atomic_load_n(&gGtkCriticalCount, __ATOMIC_SEQ_CST);
   }
 }
 
