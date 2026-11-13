@@ -218,7 +218,7 @@ class DraftReleaseTests(unittest.TestCase):
             "MicDrop-0.1.0-beta.1-ios-build.json",
         ])
         metadata = json.loads(paths[-1].read_text())
-        self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop.dev")
+        self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop")
         self.assertEqual(metadata["minimum_os"], "17.0")
         for overrides in (
             {"CFBundleShortVersionString": "0.2.0"},
@@ -377,7 +377,7 @@ class DraftReleaseTests(unittest.TestCase):
         package_unix_host.package_host_tarball(stage_dir, out_tar, platform=platform)
         return out_tar.read_bytes()
 
-    def make_macos_app_zip(self, *, revision=SHA[:12], identity=IDENTITY):
+    def make_macos_app_zip(self, *, revision=SHA[:12], identity=IDENTITY, stapled=False):
         src_dir = self.root / "macos-src"
         src_dir.mkdir(exist_ok=True)
         exe = src_dir / "MicDrop"
@@ -394,6 +394,8 @@ class DraftReleaseTests(unittest.TestCase):
             exe, dylib, notice, versions, app_out,
             revision=revision, shared_identity=identity,
         )
+        if stapled:
+            (app_out / "Contents" / "CodeResources").write_bytes(b"stapled-ticket")
         macos_app_bundle.zip_app_bundle(
             app_out, zip_out,
             revision=revision, shared_identity=identity,
@@ -421,9 +423,10 @@ class DraftReleaseTests(unittest.TestCase):
                           lambda args: json.dumps({**IDENTITY, "revision": "b" * 40, "modified": False, "platform": "linux/amd64"}))
 
     def test_macos_app_and_cli_host_are_inspected(self):
-        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip()})
+        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip(stapled=True)})
         self.retain("macos-arm64-host", {"MicDrop-macos-arm64-host.tar.gz": self.make_unix_tarball("macos-arm64")})
         codesign_targets = []
+        stapler_targets = []
 
         def macos_command(args):
             if args[0] == "codesign":
@@ -431,6 +434,9 @@ class DraftReleaseTests(unittest.TestCase):
                 for target in args[1:]:
                     if not str(target).startswith("-"):
                         self.assertTrue(Path(target).exists(), target)
+                return ""
+            if args[:3] == ["xcrun", "stapler", "validate"]:
+                stapler_targets.append(Path(args[3]).name)
                 return ""
             exe_path = Path(args[0])
             self.assertTrue(exe_path.is_file())
@@ -443,13 +449,18 @@ class DraftReleaseTests(unittest.TestCase):
             "MicDrop-0.1.0-beta.1-macos-build.json",
         ])
         self.assertEqual(codesign_targets, [["MicDrop.app"], ["libmicdrop_rtc.dylib", "micdrop-host"]])
+        self.assertEqual(stapler_targets, ["MicDrop.app"])
         metadata = json.loads(paths[-1].read_text())
         self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop.mac")
         self.assertEqual(metadata["minimum_os"], "14.2")
+        self.assertEqual(
+            metadata["signing"],
+            "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host",
+        )
         with self.assertRaisesRegex(ValueError, "Embedded macOS build identity mismatch"):
             release.stage(
                 "macos", self.artifacts, self.root / "macos-bad-embed", 42, 1, SHA, IDENTITY,
-                lambda args: "" if args[0] == "codesign" else json.dumps(
+                lambda args: "" if args[0] in {"codesign", "xcrun"} else json.dumps(
                     {**IDENTITY, "revision": SHA, "modified": True, "platform": "darwin/arm64"}),
             )
         # Also verify Info.plist revision mismatch is rejected before command execution.

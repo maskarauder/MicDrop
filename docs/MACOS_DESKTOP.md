@@ -5,7 +5,7 @@
 ## Hardware Testing Status & Feedback Wanted
 
 > [!IMPORTANT]
-> **Apple Silicon hardware feedback requested:** `MicDrop.app` and `micdrop-host` are built and verified in GitHub Actions on `macos-26` (`arm64` Mach-O & ad-hoc `codesign` validation, live AppKit window/control contracts with rendered tab screenshots, and native C++ WebRTC Opus/DTLS-SRTP loopback), **but maintainer testing does not yet include physical Apple Silicon Mac hardware.**
+> **Apple Silicon hardware feedback requested:** `MicDrop.app` and `micdrop-host` are built, Developer ID signed with Hardened Runtime, notarized with Apple (`xcrun notarytool` + stapled ticket on `MicDrop.app` + Gatekeeper `spctl --assess` verification), and contract-tested in GitHub Actions on `macos-26` (live AppKit window/control contracts with rendered tab screenshots, and native C++ WebRTC Opus/DTLS-SRTP loopback), **but maintainer testing does not yet include physical Apple Silicon Mac hardware.**
 >
 > If you test `MicDrop.app` or `micdrop-host` on an M-series Mac (macOS 14.2+), please share what works or fails in a [GitHub Issue](https://github.com/maskarauder/MicDrop/issues):
 > - Your macOS version, Mac chip model, and phone OS/model.
@@ -23,8 +23,8 @@
   - **Phones:** Approved phone list with revocation, private one-time QR code invitation (rendered with nearest-neighbor Retina crispness), `Copy pairing link`, and request-ID verification (`Approve` / `Reject`).
   - **Options:** Opt-in per-user login startup (`~/Library/LaunchAgents/com.maskarauder.micdrop.host.plist` running `MicDrop desktop --background` in the `Aqua` session), macOS Notification Center alerts (`UNUserNotificationCenter`), and connection log retention controls.
   - **Phone Settings Editor:** Live/Audio/Advanced remote phone settings editing with revision locking and explicit `Reload` protection on concurrent phone-side changes.
-- **Menu Bar (`NSStatusItem`) & System Icons:**
-  - Uses standard macOS SF Symbols (`mic`, `mic.fill`, `waveform`) in template mode with `Open MicDrop`, `Start host` / `Stop host`, and `Quit MicDrop`. No custom generated icon artwork is bundled.
+- **App Bundle Icon & Menu Bar (`NSStatusItem`):**
+  - Bundles `AppIcon.icns` (`apps/windows-host/resources/AppIcon.icns`, verified by `tools/generate_apple_icons.py check`) as `Contents/Resources/AppIcon.icns` for Finder and Dock, while the menu bar `NSStatusItem` uses standard macOS SF Symbols (`mic`, `mic.fill`, `waveform`) in template mode with `Open MicDrop`, `Start host` / `Stop host`, and `Quit MicDrop`.
   - Closing the window hides it to the menu bar while `NSStatusItem` is active; clicking `MicDrop` in Finder/Dock or launching a second instance brings the existing window forward (`desktop.lock` + `SIGUSR1` / `applicationShouldHandleReopen:`).
 
 ## Files and State Locations

@@ -5,10 +5,11 @@ iPhone and its headphones. It can also send the phone or a supported headset
 microphone back to the computer.
 
 This is an early volunteer beta. Windows and Linux packages are unsigned, macOS
-packages are ad-hoc signed without Apple Developer ID notarization, Android is a
-sideloaded development app, and the optional iPhone build is an unsigned IPA
-sideloaded with your own Apple ID. Send installation blocks or security detections
-to the maintainer; do not disable antivirus or Play Protect to install it.
+packages are Developer ID signed and Apple-notarized, Android is a sideloaded
+development app, and the iPhone build can be installed via Apple TestFlight
+(invite link from the maintainer) or sideloaded from the optional unsigned IPA
+with your own Apple ID. Send installation blocks or security detections to the
+maintainer; do not disable antivirus or Play Protect to install it.
 
 ## What you need
 
@@ -17,17 +18,18 @@ to the maintainer; do not disable antivirus or Play Protect to install it.
   an Android 12+ arm64 phone or an iPhone running iOS 17+ (arm64).
 - Both devices on the same trusted home network for the first test. The computer
   may use Ethernet; avoid guest Wi-Fi that isolates devices.
-- The matching desktop host package and Android APK (or optional unsigned iPhone
-  IPA) supplied by the maintainer.
+- The matching desktop host package and Android APK (or TestFlight invite /
+  optional unsigned iPhone IPA) supplied by the maintainer.
 - Optional headphones. Test the phone speaker first to establish a baseline.
 
 No developer tools, USB debugging, account, or internet connection are needed
 for local Android playback. Android may ask for permission to install from the
 browser or file manager used to open the APK; allow that source only for
-installation, then turn the permission off again. Sideloading on iPhone requires
-Apple's web (non-Microsoft Store) iTunes/iCloud USB drivers (on Windows), an
-Apple ID for 7-day free developer signing, and internet access once to trust the
-developer certificate on the phone.
+installation, then turn the permission off again. Installing on iPhone via
+TestFlight requires only Apple's TestFlight app from the App Store; sideloading
+the unsigned IPA instead requires Apple's web (non-Microsoft Store) iTunes/iCloud
+USB drivers (on Windows), an Apple ID for 7-day free developer signing, and
+internet access once to trust the developer certificate on the phone.
 
 ## Install and pair
 
@@ -54,10 +56,11 @@ developer certificate on the phone.
      install it. For an existing development installation, update it in place. If
      Android reports an incompatible signature, stop and report it before
      uninstalling; uninstalling removes saved app data and pairing.
-   - **iPhone (optional beta)**: Connect the iPhone over USB and sign/install
+   - **iPhone**: Install MicDrop from the maintainer's **TestFlight** invite, or
+     connect the iPhone over USB and sign/install
      `MicDrop-<version>-ios-arm64-unsigned.ipa` with your Apple ID using
      [iloader](https://github.com/nab138/iloader) or [Sideloadly](https://sideloadly.io/)
-     (keep the default bundle ID `com.maskarauder.micdrop.dev`). On first sideload,
+     (keep the default bundle ID `com.maskarauder.micdrop`). On first sideload,
      enable **Settings → Privacy & Security → Developer Mode** (requires restart),
      trust your Apple ID under **Settings → General → VPN & Device Management**,
      then open MicDrop and allow **Local Network** access when prompted. Free Apple ID

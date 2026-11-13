@@ -54,7 +54,14 @@ def fat(thin, offset=0x4000):
 def info_plist(**overrides):
     info = {
         "CFBundleExecutable": "MicDrop",
-        "CFBundleIdentifier": "com.maskarauder.micdrop.dev",
+        "CFBundleIdentifier": "com.maskarauder.micdrop",
+        "CFBundleIcons": {
+            "CFBundlePrimaryIcon": {
+                "CFBundleIconFiles": ["AppIcon60x60"],
+                "CFBundleIconName": "AppIcon",
+            }
+        },
+        "ITSAppUsesNonExemptEncryption": False,
         "MinimumOSVersion": "17.0",
         "UIDeviceFamily": [1],
         "UIBackgroundModes": ["audio"],
@@ -83,11 +90,18 @@ def framework_plist(**overrides):
     return plistlib.dumps(info, fmt=plistlib.FMT_BINARY)
 
 
+COMMITTED_PRIVACY = (
+    Path(__file__).resolve().parents[1] / "apps" / "ios" / "MicDrop" / "PrivacyInfo.xcprivacy"
+).read_bytes()
+
+
 def entries(**overrides):
     files = {
         "Payload/": None,
         APP: None,
         APP + "Info.plist": info_plist(),
+        APP + "Assets.car": b"BOMStore-compiled-assets",
+        APP + "PrivacyInfo.xcprivacy": COMMITTED_PRIVACY,
         APP + "MicDrop": macho(),
         APP + "Frameworks/": None,
         APP + "Frameworks/WebRTC.framework/": None,
@@ -124,12 +138,18 @@ class IPhoneBundleTest(unittest.TestCase):
                 package.writestr(info, target)
         return self.ipa
 
-    def check(self, files, revision=None, symlinks=()):
-        return check_ipa(self.write(files, symlinks), "com.maskarauder.micdrop.dev", "17.0", revision)
+    def check(self, files, revision=None, symlinks=(), *, signed=False):
+        return check_ipa(
+            self.write(files, symlinks),
+            "com.maskarauder.micdrop",
+            "17.0",
+            revision,
+            signed=signed,
+        )
 
-    def rejects(self, pattern, files, revision=None, symlinks=()):
+    def rejects(self, pattern, files, revision=None, symlinks=(), *, signed=False):
         with self.assertRaisesRegex(ValueError, pattern):
-            self.check(files, revision, symlinks)
+            self.check(files, revision, symlinks, signed=signed)
 
     def test_complete_valid_ipa_passes(self):
         files = entries()
@@ -142,7 +162,7 @@ class IPhoneBundleTest(unittest.TestCase):
         self.rejects("Background audio mode is missing", entries(**{APP + "Info.plist": info_plist(UIBackgroundModes=None)}))
 
     def test_wrong_bundle_identifier_is_rejected(self):
-        self.rejects("Info.plist CFBundleIdentifier is 'com.example.other'; expected 'com.maskarauder.micdrop.dev'",
+        self.rejects("Info.plist CFBundleIdentifier is 'com.example.other'; expected 'com.maskarauder.micdrop'",
                      entries(**{APP + "Info.plist": info_plist(CFBundleIdentifier="com.example.other")}))
 
     def test_wrong_minimum_os_or_device_family_is_rejected(self):
@@ -155,6 +175,43 @@ class IPhoneBundleTest(unittest.TestCase):
         self.rejects("must be unsigned", entries(**{APP + "_CodeSignature/CodeResources": b"seal"}))
         self.rejects("must be unsigned",
                      entries(**{APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"seal"}))
+
+    def test_signed_ipa_requires_signatures_and_provisioning_profile(self):
+        signed_files = entries(**{
+            APP + "_CodeSignature/CodeResources": b"<plist><dict/></plist>",
+            APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"<plist><dict/></plist>",
+            APP + "embedded.mobileprovision": b"cms-profile-bytes",
+            "Symbols/MicDrop.symbols": b"symbols",
+        })
+        self.assertRegex(self.check(signed_files, revision="local", signed=True), "^[0-9a-f]{64}$")
+        for missing_key in (
+            APP + "_CodeSignature/CodeResources",
+            APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources",
+            APP + "embedded.mobileprovision",
+        ):
+            mutated = dict(signed_files)
+            mutated[missing_key] = False
+            self.rejects("Signed IPA is missing non-empty", mutated, signed=True)
+
+    def test_export_compliance_app_icon_and_privacy_manifest_are_required(self):
+        self.rejects("ITSAppUsesNonExemptEncryption must be false",
+                     entries(**{APP + "Info.plist": info_plist(ITSAppUsesNonExemptEncryption=True)}))
+        self.rejects("ITSAppUsesNonExemptEncryption must be false",
+                     entries(**{APP + "Info.plist": info_plist(ITSAppUsesNonExemptEncryption=None)}))
+        self.rejects("CFBundleIcons",
+                     entries(**{APP + "Info.plist": info_plist(CFBundleIcons=None)}))
+        self.rejects("Assets.car",
+                     entries(**{APP + "Assets.car": False}))
+        self.rejects("PrivacyInfo.xcprivacy",
+                     entries(**{APP + "PrivacyInfo.xcprivacy": False}))
+        bad_privacy = plistlib.dumps({
+            "NSPrivacyTracking": True,
+            "NSPrivacyTrackingDomains": [],
+            "NSPrivacyCollectedDataTypes": [],
+            "NSPrivacyAccessedAPITypes": [],
+        })
+        self.rejects("NSPrivacyTracking must be false",
+                     entries(**{APP + "PrivacyInfo.xcprivacy": bad_privacy}))
 
     def test_traversal_entry_is_unsafe(self):
         self.rejects("IPA entry is unsafe: Payload/../x", entries(**{"Payload/../x": b"x"}))
@@ -306,15 +363,24 @@ class IPhoneBundleTest(unittest.TestCase):
     def test_command_line_reports_the_first_failure(self):
         script = Path(__file__).with_name("check_ios_bundle.py")
         ipa = self.write(entries(**{APP + "ios-notices.txt": False}))
-        run = subprocess.run([sys.executable, str(script), str(ipa), "--bundle-id", "com.maskarauder.micdrop.dev",
+        run = subprocess.run([sys.executable, str(script), str(ipa), "--bundle-id", "com.maskarauder.micdrop",
                               "--minimum-os", "17.0"], capture_output=True, text=True)
         self.assertEqual(1, run.returncode)
         self.assertEqual("iPhone bundle check failed: Missing notice ios-notices.txt\n", run.stderr)
         ipa = self.write(entries())
-        run = subprocess.run([sys.executable, str(script), str(ipa), "--bundle-id", "com.maskarauder.micdrop.dev",
+        run = subprocess.run([sys.executable, str(script), str(ipa), "--bundle-id", "com.maskarauder.micdrop",
                               "--minimum-os", "17.0", "--revision", "local"], capture_output=True, text=True)
         self.assertEqual(0, run.returncode, run.stderr)
         self.assertRegex(run.stdout, "^Verified unsigned iPhone IPA [0-9a-f]{64}\n$")
+        signed_ipa = self.write(entries(**{
+            APP + "_CodeSignature/CodeResources": b"seal",
+            APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"seal",
+            APP + "embedded.mobileprovision": b"profile",
+        }))
+        run = subprocess.run([sys.executable, str(script), str(signed_ipa), "--bundle-id", "com.maskarauder.micdrop",
+                              "--minimum-os", "17.0", "--revision", "local", "--signed"], capture_output=True, text=True)
+        self.assertEqual(0, run.returncode, run.stderr)
+        self.assertRegex(run.stdout, "^Verified signed iPhone IPA [0-9a-f]{64}\n$")
         ipa.write_bytes(b"not a zip")
         run = subprocess.run([sys.executable, str(script), str(ipa), "--bundle-id", "x", "--minimum-os", "17.0"],
                              capture_output=True, text=True)

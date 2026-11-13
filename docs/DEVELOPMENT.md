@@ -601,19 +601,23 @@ same Wi-Fi (Bonjour, installed with iTunes, is required for Wi-Fi). A free accou
 **3** sideloaded apps installed and create **10** App IDs per 7 days. Use the normal Apple ID
 password; app-specific passwords only partly work, and only with a paid developer account.
 
-The provisional bundle ID is `com.maskarauder.micdrop.dev`. Re-sideload with the same Apple ID and
-bundle ID to refresh or update in place; this keeps settings, the saved connection and the pairing
-identity, so Windows needs no new approval. A different Apple ID or a changed bundle ID needs
-**Forget saved connection** and re-pairing, and the old phone key should be removed on Windows
+The iPhone bundle ID is `com.maskarauder.micdrop` (upgrading from an older `.dev` sideload installs
+alongside or replaces the old app and requires re-pairing once). Re-sideload with the same Apple ID
+and bundle ID to refresh or update in place; this keeps settings, the saved connection and the pairing
+identity, so the desktop host needs no new approval. A different Apple ID or a changed bundle ID needs
+**Forget saved connection** and re-pairing, and the old phone key should be removed on the desktop host
 (`Phones → Remove selected phone` in the desktop app, or `devices`, then `revoke <full-phone-key>`
 in the console). Deleting the app removes its data; the next install
-starts without the old pairing, and Windows still needs removal for the old key.
+starts without the old pairing, and the host still needs removal for the old key.
 
-Never put an Apple ID, app-specific password, certificate, provisioning profile or App Store
-Connect key into repository secrets or files; CI stays secret-free. Fork pull requests also build
-unsigned IPAs from their own code: sideload only builds of `main` or your own branches. CI does not
-malware-scan the IPA; your own Apple ID's signing at install time is the integrity boundary, so
-verify the SHA-256 shown in the summary.
+Repository Actions secrets (`APPLE_TEAM_ID`, `APPLE_DEV_ID_P12_BASE64`, `APPLE_DEV_ID_P12_PASSWORD`,
+`APPLE_DIST_P12_BASE64`, `APPLE_DIST_P12_PASSWORD`, `APPLE_IOS_PROVISION_PROFILE_BASE64`,
+`APPLE_API_PRIVATE_KEY_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) are never committed to
+source control and are never exposed to `pull_request` runs (`tools/apple_signing.py` imports `.p12`
+identities into an ephemeral `$RUNNER_TEMP` keychain and removes the keychain, profiles, and `.p8`
+file under `if: always()`). Never put a personal Apple ID password or 2FA session into repository
+secrets. Fork pull requests still build unsigned IPAs and ad-hoc macOS packages from their own code:
+sideload only builds of `main` or your own branches, and verify the SHA-256 shown in the job summary.
 
 A periodic sine, RTT or output-buffer counter is not a physical latency result.
 Follow [measurement requirements](LATENCY.md), record the actual route and

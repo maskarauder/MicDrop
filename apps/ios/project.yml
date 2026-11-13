@@ -25,6 +25,9 @@ settings:
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
     DEVELOPMENT_TEAM: ""
+    MICDROP_DEVELOPMENT_TEAM: ""
+    MICDROP_CODE_SIGN_IDENTITY: ""
+    MICDROP_PROVISIONING_PROFILE_SPECIFIER: ""
     COMPILER_INDEX_STORE_ENABLE: "NO"
     DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
     ENABLE_DEBUG_DYLIB: "NO"
@@ -54,7 +57,11 @@ targets:
     settings:
       base:
         PRODUCT_NAME: MicDrop
-        PRODUCT_BUNDLE_IDENTIFIER: com.maskarauder.micdrop.dev
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskarauder.micdrop
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        DEVELOPMENT_TEAM: "$(MICDROP_DEVELOPMENT_TEAM)"
+        CODE_SIGN_IDENTITY: "$(MICDROP_CODE_SIGN_IDENTITY)"
+        PROVISIONING_PROFILE_SPECIFIER: "$(MICDROP_PROVISIONING_PROFILE_SPECIFIER)"
         # XcodeGen's iOS target preset sets 1,2; the app is iPhone-only (checked by check_ios_bundle.py).
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_FILE: MicDrop/Info.plist

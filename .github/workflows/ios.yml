@@ -11,6 +11,10 @@ on:
       - 'tools/fetch_webrtc.py'
       - 'tools/check_swiftpm_pins.py'
       - 'tools/release_version.py'
+      - 'tools/apple_signing.py'
+      - 'tools/test_apple_signing.py'
+      - 'tools/generate_apple_icons.py'
+      - 'tools/test_generate_apple_icons.py'
       - 'internal/version/version.properties'
       - 'LICENSE'
       - 'NOTICE'
@@ -24,6 +28,10 @@ on:
       - 'tools/fetch_webrtc.py'
       - 'tools/check_swiftpm_pins.py'
       - 'tools/release_version.py'
+      - 'tools/apple_signing.py'
+      - 'tools/test_apple_signing.py'
+      - 'tools/generate_apple_icons.py'
+      - 'tools/test_generate_apple_icons.py'
       - 'internal/version/version.properties'
       - 'LICENSE'
       - 'NOTICE'
@@ -35,9 +43,13 @@ on:
         type: boolean
         default: true
       upload_artifacts:
-        description: Upload unsigned IPA and diagnostic artifacts to GitHub Actions
+        description: Upload iPhone IPAs and diagnostic artifacts to GitHub Actions
         type: boolean
         default: true
+      upload_testflight:
+        description: Upload signed iPhone IPA to App Store Connect / TestFlight (requires unique version/build number)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,11 +64,11 @@ env:
 
 jobs:
   ios:
-    name: iPhone unsigned IPA
+    name: iPhone app
     runs-on: macos-26
     timeout-minutes: 60
     env:
-      MICDROP_BUNDLE_ID: com.maskarauder.micdrop.dev
+      MICDROP_BUNDLE_ID: com.maskarauder.micdrop
       XCODE_RESOLVED: apps/ios/MicDrop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
     defaults:
       run:
@@ -92,11 +104,13 @@ jobs:
           python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
       - name: Check committed Swift package pins and notices
         run: python3 tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
+      - name: Verify committed Apple icon assets
+        run: python3 tools/generate_apple_icons.py check
       - name: Prepare build scratch directories
         run: |
           set -euo pipefail
           cache="$RUNNER_TEMP/micdrop-ios-build"
-          mkdir -p "$cache/dependency-archives" "$cache/SourcePackages" "$cache/DerivedData"
+          mkdir -p "$cache/dependency-archives" "$cache/SourcePackages" "$cache/DerivedData" "$cache/DerivedData-archive"
           echo "MICDROP_IOS_CACHE=$cache" >> "$GITHUB_ENV"
           mkdir -p .deps
           if [ -e .deps/cache ] || [ -L .deps/cache ]; then
@@ -289,3 +303,132 @@ jobs:
             build/ios/simulator-results.xcresult
           if-no-files-found: warn
           retention-days: 7
+      - name: Prepare iOS App Store signing
+        id: ios_signing
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DIST_P12_BASE64: ${{ secrets.APPLE_DIST_P12_BASE64 }}
+          APPLE_DIST_P12_PASSWORD: ${{ secrets.APPLE_DIST_P12_PASSWORD }}
+          APPLE_IOS_PROVISION_PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISION_PROFILE_BASE64 }}
+          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: python3 tools/apple_signing.py prepare-ios --bundle-id "$MICDROP_BUNDLE_ID"
+      - name: Archive and export signed iPhone IPA
+        id: archive
+        if: steps.ios_signing.outputs.signed == 'true'
+        run: |
+          set -uo pipefail
+          rm -rf build/ios/MicDrop.xcarchive build/ios/signed-export build/ios/MicDrop-signed.ipa
+          mkdir -p build/ios
+          archive_log=build/ios/xcodebuild-archive.log
+          export_log=build/ios/xcodebuild-export.log
+          status=0
+          xcodebuild archive -quiet \
+            -project apps/ios/MicDrop.xcodeproj -scheme MicDrop -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/ios/MicDrop.xcarchive \
+            -derivedDataPath "$MICDROP_IOS_CACHE/DerivedData-archive" \
+            -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO \
+            MICDROP_DEVELOPMENT_TEAM="$MICDROP_IOS_TEAM_ID" \
+            MICDROP_CODE_SIGN_IDENTITY="$MICDROP_IOS_SIGN_IDENTITY" \
+            MICDROP_PROVISIONING_PROFILE_SPECIFIER="$MICDROP_IOS_PROFILE_SPECIFIER" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $MICDROP_APPLE_KEYCHAIN" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            MARKETING_VERSION="$MICDROP_MARKETING_VERSION" CURRENT_PROJECT_VERSION="$MICDROP_BUILD_NUMBER" \
+            MICDROP_VERSION_NAME="$MICDROP_VERSION_NAME" \
+            MICDROP_REVISION="$MICDROP_REVISION" >"$archive_log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::group::xcodebuild archive output (last 150 lines)"
+            tail -n 150 "$archive_log"
+            echo "::endgroup::"
+            grep -E 'error:|^ld: |Undefined symbol|duplicate symbol' "$archive_log" | sort -u | head -n 300 || true
+            exit "$status"
+          fi
+          codesign --verify --deep --strict --verbose=2 build/ios/MicDrop.xcarchive/Products/Applications/MicDrop.app
+          xcodebuild -exportArchive \
+            -archivePath build/ios/MicDrop.xcarchive \
+            -exportOptionsPlist "$MICDROP_IOS_EXPORT_OPTIONS" \
+            -exportPath build/ios/signed-export >"$export_log" 2>&1 || status=$?
+          cat "$export_log"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          test -f build/ios/signed-export/MicDrop.ipa
+          cp build/ios/signed-export/MicDrop.ipa build/ios/MicDrop-signed.ipa
+          shasum -a 256 build/ios/MicDrop-signed.ipa | tee build/ios/MicDrop-signed.ipa.sha256
+      - name: Retain signed archive failure logs
+        if: failure() && steps.archive.outcome == 'failure'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: true
+          name: ios-xcodebuild-archive-log
+          path: |
+            build/ios/xcodebuild-archive.log
+            build/ios/xcodebuild-export.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Verify signed iPhone IPA
+        if: steps.ios_signing.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/check_ios_bundle.py build/ios/MicDrop-signed.ipa \
+            --bundle-id "$MICDROP_BUNDLE_ID" --minimum-os 17.0 --revision "$MICDROP_REVISION" --signed
+          rm -rf build/ios/signed-extracted
+          mkdir -p build/ios/signed-extracted
+          ditto -x -k build/ios/MicDrop-signed.ipa build/ios/signed-extracted
+          codesign --verify --deep --strict --verbose=2 build/ios/signed-extracted/Payload/MicDrop.app
+          codesign -dv --verbose=4 build/ios/signed-extracted/Payload/MicDrop.app 2>&1 | grep -E '^(Authority|TeamIdentifier|Identifier)='
+          rm -rf build/ios/signed-extracted
+      - name: Retain signed iPhone IPA
+        id: ios_signed_ipa
+        if: steps.ios_signing.outputs.signed == 'true'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          name: ios-signed-ipa
+          path: build/ios/MicDrop-signed.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Upload signed iPhone IPA to TestFlight
+        id: testflight
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_testflight == true
+        env:
+          SIGNED_READY: ${{ steps.ios_signing.outputs.signed }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED_READY" != "true" ]; then
+            echo "::error::TestFlight upload was requested, but iOS App Store signing secrets are not configured."
+            exit 1
+          fi
+          python3 tools/apple_signing.py upload-testflight build/ios/MicDrop-signed.ipa
+      - name: Summarize signed iPhone IPA and TestFlight status
+        if: steps.ios_signing.outputs.signed == 'true'
+        env:
+          SIGNED_IPA_URL: ${{ steps.ios_signed_ipa.outputs.artifact-url }}
+          TESTFLIGHT_OUTCOME: ${{ steps.testflight.outcome }}
+        run: |
+          {
+            echo
+            echo "### App Store Connect / TestFlight build"
+            if [ -n "$SIGNED_IPA_URL" ]; then
+              echo "[Download MicDrop-signed.ipa]($SIGNED_IPA_URL)"
+              echo
+            fi
+            echo "SHA-256 \`$(cut -d' ' -f1 build/ios/MicDrop-signed.ipa.sha256)\` · version \`$MICDROP_MARKETING_VERSION ($MICDROP_BUILD_NUMBER)\` · bundle \`$MICDROP_BUNDLE_ID\`"
+            echo
+            if [ "$TESTFLIGHT_OUTCOME" = "success" ]; then
+              echo "Uploaded to App Store Connect / TestFlight via \`xcrun altool\`."
+            else
+              echo "Signed App Store IPA verified (run \`workflow_dispatch\` with \`upload_testflight: true\` to submit to TestFlight)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove runner Apple signing material
+        if: always()
+        run: python3 tools/apple_signing.py cleanup

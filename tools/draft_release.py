@@ -29,6 +29,7 @@ from windows_payload import PORTABLE, INSTALLER_ONLY
 
 SHA = r"[0-9a-f]{40}"
 DIGEST = r"[0-9a-f]{64}"
+IOS_BUNDLE_ID = "com.maskarauder.micdrop"
 
 
 def digest(path):
@@ -200,6 +201,12 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
             cli_dylib = host_root / top_dir / UNIX_HOST_PLATFORMS["macos-arm64"]["rtc_lib"]
             command(["codesign", "--verify", "--deep", "--strict", app_bundle])
             command(["codesign", "--verify", "--strict", cli_dylib, cli_exe])
+            stapled = (app_bundle / "Contents" / "CodeResources").is_file()
+            if stapled:
+                command(["xcrun", "stapler", "validate", app_bundle])
+                macos_signing = "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"
+            else:
+                macos_signing = "ad-hoc signed macOS arm64 app bundle and CLI host"
             expected_embed = {**identity, "revision": sha, "modified": False, "platform": "darwin/arm64"}
             app_actual = json.loads(command([app_exe, "version"]))
             if any(app_actual.get(k) != v for k, v in expected_embed.items()):
@@ -216,7 +223,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         info.update({
             "bundle_id": MACOS_BUNDLE_ID,
             "minimum_os": DEFAULT_MIN_MACOS,
-            "signing": "ad-hoc signed macOS arm64 app bundle and CLI host",
+            "signing": macos_signing,
         })
     elif platform == "android":
         files = retained(root, "android-apk", run_id, attempt, sha)
@@ -248,7 +255,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         versions = bundle_versions(identity)
         check_ipa(
             ipa,
-            "com.maskarauder.micdrop.dev",
+            IOS_BUNDLE_ID,
             "17.0",
             sha[:12],
             marketing_version=versions["MICDROP_MARKETING_VERSION"],
@@ -259,7 +266,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         shutil.copyfile(ipa, target)
         packages.append(target)
         info.update({
-            "bundle_id": "com.maskarauder.micdrop.dev",
+            "bundle_id": IOS_BUNDLE_ID,
             "minimum_os": "17.0",
             "signing": "unsigned iPhone bundle (sideload with Apple ID)",
             "ipa_provenance": provenance,
@@ -361,10 +368,10 @@ def marker(run):
 def release_body(run, identity, notes, complete):
     status = "Packages verified; draft awaits human review." if complete else "INCOMPLETE: package uploads/verification are still pending. Do not publish."
     return (marker(run) + "\n\n" + status + "\n\n" + notes.strip() + "\n\n"
-            + "Development packages: Windows and Linux x64 are unsigned; macOS arm64 uses ad-hoc code signing (`com.maskarauder.micdrop.mac`); "
-            + "Android uses the existing development signer and `com.maskarauder.micdrop.dev`. "
-            + "First-party source is MPL-2.0; provide recipients with matching source and notices. "
-            + "Production signing and store distribution remain separate release work.\n\n"
+            + "Package signing: macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized; "
+            + "Windows and Linux x64 are unsigned; Android uses the existing development signer (`com.maskarauder.micdrop.dev`); "
+            + "any included iPhone `.ipa` (`com.maskarauder.micdrop`) is unsigned for Apple ID sideloading (TestFlight builds are distributed via App Store Connect). "
+            + "First-party source is MPL-2.0; provide recipients with matching source and notices.\n\n"
             + f"Source: `{run['head_sha']}` · Android version code: `{identity['android_version_code']}`\n\n"
             + f"Verified build: {run['html_url']} (attempt {run['run_attempt']}).\n")
 
