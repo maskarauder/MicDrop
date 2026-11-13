@@ -101,7 +101,7 @@ scoped to the draft workflow, while normal CI builds retain read-only permission
 | `MicDrop-<version>-linux-build.json` | Linux source/build identity and archive hash |
 | `MicDrop-<version>-macos-arm64-app.zip` | Developer ID signed, Apple-notarized macOS 14.2+ arm64 `MicDrop.app` desktop bundle |
 | `MicDrop-<version>-macos-arm64-host.tar.gz` | Developer ID signed, Apple-notarized macOS 14.2+ arm64 CLI host, WebRTC `.dylib`, and notices |
-| `MicDrop-<version>-macos-build.json` | macOS bundle/source identity, notarization status, minimum OS, and package hashes |
+| `MicDrop-<version>-macos-build.json` | macOS bundle/source identity, Developer ID signing and notarization status, minimum OS, and package hashes |
 | `MicDrop-<version>-android-arm64-dev.apk` | Existing development identity, with the new version code |
 | `MicDrop-<version>-android-build.json` | Android identity, public signer fingerprint and package hash |
 | `MicDrop-<version>-ios-arm64-unsigned.ipa` | Optional unsigned iPhone bundle (`com.maskarauder.micdrop`) for Apple ID sideloading |

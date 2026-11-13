@@ -70,7 +70,7 @@ def run_command(arguments):
     result = subprocess.run([str(a) for a in arguments], capture_output=True, text=True, timeout=60)
     if result.returncode:
         raise ValueError(f"Package verification failed: {Path(arguments[0]).name}")
-    return result.stdout
+    return result.stdout if result.stdout else result.stderr
 
 
 def _extract_verified_host_tarball(tar_path, destination):
@@ -172,6 +172,79 @@ def _inspect_windows_authenticode(targets, command):
     }
 
 
+def _inspect_macos_codesign(app_bundle, cli_dylib, cli_exe, *, stapled, command):
+    app_dylib = app_bundle / "Contents" / "Frameworks" / UNIX_HOST_PLATFORMS["macos-arm64"]["rtc_lib"]
+    targets = [
+        ("MicDrop.app", app_bundle),
+        (f"MicDrop.app/{app_dylib.name}", app_dylib),
+        (cli_dylib.name, cli_dylib),
+        (cli_exe.name, cli_exe),
+    ]
+    parsed = []
+    for label, target in targets:
+        details = command(["codesign", "-dv", "--verbose=4", target])
+        authorities = [m.strip() for m in re.findall(r"^Authority=(.+)$", details, re.MULTILINE)]
+        team_match = re.search(r"^TeamIdentifier=(.+)$", details, re.MULTILINE)
+        team_id = team_match.group(1).strip() if team_match else ""
+        is_adhoc = not authorities and bool(
+            re.search(r"^Signature=adhoc\b|^CodeDirectory\b[^\n]*\([^)\n]*\badhoc\b[^)\n]*\)", details, re.MULTILINE)
+        )
+        if is_adhoc:
+            if team_id not in {"", "not set"}:
+                raise ValueError(f"Unexpected TeamIdentifier {team_id!r} on ad-hoc signed {label}")
+            parsed.append({"mode": "adhoc", "label": label})
+            continue
+        if not authorities:
+            raise ValueError(f"Unrecognized or missing macOS code signature metadata on {label}")
+        leaf_authority = authorities[0]
+        if not leaf_authority.startswith("Developer ID Application:"):
+            raise ValueError(f"Unsupported macOS signing authority on {label}: {leaf_authority}")
+        if not re.fullmatch(r"[A-Z0-9]{10}", team_id):
+            raise ValueError(f"Missing or invalid macOS TeamIdentifier on {label}: {team_id!r}")
+        if not re.search(r"^CodeDirectory\b[^\n]*\([^)\n]*\bruntime\b[^)\n]*\)", details, re.MULTILINE):
+            raise ValueError(f"macOS Developer ID signature on {label} is missing Hardened Runtime")
+        if not re.search(r"^Timestamp=\S", details, re.MULTILINE):
+            raise ValueError(f"macOS Developer ID signature on {label} is missing a secure timestamp")
+        parsed.append({
+            "mode": "developer_id",
+            "label": label,
+            "authority": leaf_authority,
+            "team_id": team_id,
+        })
+
+    modes = {item["mode"] for item in parsed}
+    if len(modes) != 1:
+        raise ValueError("Inconsistent macOS code-signing state across MicDrop.app and CLI host binaries")
+    mode = next(iter(modes))
+    if mode == "adhoc":
+        if stapled:
+            raise ValueError("Ad-hoc signed macOS app bundle cannot carry a stapled notarization ticket")
+        return {
+            "developer_id_signed": False,
+            "notarized": False,
+            "signing": "ad-hoc signed macOS arm64 app bundle and CLI host",
+        }
+
+    authorities = {item["authority"] for item in parsed}
+    team_ids = {item["team_id"] for item in parsed}
+    if len(authorities) != 1 or len(team_ids) != 1:
+        raise ValueError("Mismatched Developer ID signer identity across macOS app bundle and CLI host")
+    authority = next(iter(authorities))
+    team_id = next(iter(team_ids))
+    if stapled:
+        command(["xcrun", "stapler", "validate", app_bundle])
+        signing_desc = "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"
+    else:
+        signing_desc = "Developer ID signed macOS arm64 app bundle and CLI host (not notarized)"
+    return {
+        "developer_id_signed": True,
+        "notarized": stapled,
+        "signing": signing_desc,
+        "signer_authority": authority,
+        "team_id": team_id,
+    }
+
+
 def stage(platform, root, output, run_id, attempt, sha, identity, command=run_command, *, ios_ipa=None):
     if not re.fullmatch(SHA, sha) or not str(run_id).isdecimal() or not str(attempt).isdecimal():
         raise ValueError("Invalid build identity")
@@ -266,11 +339,9 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
             command(["codesign", "--verify", "--deep", "--strict", app_bundle])
             command(["codesign", "--verify", "--strict", cli_dylib, cli_exe])
             stapled = (app_bundle / "Contents" / "CodeResources").is_file()
-            if stapled:
-                command(["xcrun", "stapler", "validate", app_bundle])
-                macos_signing = "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"
-            else:
-                macos_signing = "ad-hoc signed macOS arm64 app bundle and CLI host"
+            macos_sig = _inspect_macos_codesign(
+                app_bundle, cli_dylib, cli_exe, stapled=stapled, command=command
+            )
             expected_embed = {**identity, "revision": sha, "modified": False, "platform": "darwin/arm64"}
             app_actual = json.loads(command([app_exe, "version"]))
             if any(app_actual.get(k) != v for k, v in expected_embed.items()):
@@ -287,8 +358,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         info.update({
             "bundle_id": MACOS_BUNDLE_ID,
             "minimum_os": DEFAULT_MIN_MACOS,
-            "notarized": stapled,
-            "signing": macos_signing,
+            **macos_sig,
         })
     elif platform == "android":
         files = retained(root, "android-apk", run_id, attempt, sha)
@@ -500,25 +570,65 @@ def _signing_summary_from_builds(builds):
 
     win = builds["windows"]
     win_signing = str(win.get("signing", ""))
+    win_signing_lower = win_signing.lower()
     win_signed = win.get("authenticode_signed")
-    if win_signed is True or (win_signed is None and bool(win.get("certificate_sha256"))):
+    if not isinstance(win_signed, bool) and win_signed is not None:
+        raise ValueError(f"Invalid Windows authenticode_signed value: {win_signed!r}")
+    if (
+        (win_signed is True or (win_signed is None and bool(win.get("certificate_sha256"))))
+        and "authenticode-signed" in win_signing_lower
+        and "unsigned" not in win_signing_lower
+    ):
         win_clause = "Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped"
-    elif win_signed is False or "unsigned" in win_signing.lower():
+    elif (
+        win_signed in {False, None}
+        and "unsigned" in win_signing_lower
+        and "authenticode-signed" not in win_signing_lower
+    ):
         win_clause = "Windows x64 packages are unsigned"
     else:
-        raise ValueError(f"Unrecognized Windows signing metadata: {win_signing!r}")
+        raise ValueError(f"Unrecognized or inconsistent Windows signing metadata: {win_signing!r}")
 
     mac = builds["macos"]
+    mac_bundle_id = mac.get("bundle_id", MACOS_BUNDLE_ID)
     mac_signing = str(mac.get("signing", ""))
+    mac_signing_lower = mac_signing.lower()
+    mac_dev_id = mac.get("developer_id_signed")
     mac_notarized = mac.get("notarized")
-    if mac_notarized is True or (mac_notarized is None and "Apple-notarized" in mac_signing):
-        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized"
-    elif "Developer ID signed" in mac_signing:
-        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed (not notarized)"
-    elif mac_notarized is False or "ad-hoc" in mac_signing.lower():
-        mac_clause = "macOS arm64 (`com.maskarauder.micdrop.mac`) is ad-hoc signed without Apple notarization"
+    if (not isinstance(mac_dev_id, bool) and mac_dev_id is not None) or (
+        not isinstance(mac_notarized, bool) and mac_notarized is not None
+    ):
+        raise ValueError(
+            f"Invalid macOS signing flags: developer_id_signed={mac_dev_id!r}, notarized={mac_notarized!r}"
+        )
+    if mac_notarized is True and mac_dev_id is False:
+        raise ValueError("Inconsistent macOS signing metadata: notarized bundle must be Developer ID signed")
+    if (
+        (mac_notarized is True or (mac_notarized is None and "apple-notarized" in mac_signing_lower))
+        and mac_dev_id in {True, None}
+        and "developer id signed" in mac_signing_lower
+        and "apple-notarized" in mac_signing_lower
+        and "ad-hoc" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is Developer ID signed and Apple-notarized"
+    elif (
+        mac_notarized in {False, None}
+        and (mac_dev_id is True or (mac_dev_id is None and "developer id signed" in mac_signing_lower))
+        and "developer id signed" in mac_signing_lower
+        and "apple-notarized" not in mac_signing_lower
+        and "ad-hoc" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is Developer ID signed without Apple notarization"
+    elif (
+        mac_notarized in {False, None}
+        and mac_dev_id in {False, None}
+        and "ad-hoc" in mac_signing_lower
+        and "developer id" not in mac_signing_lower
+        and "apple-notarized" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is ad-hoc signed without Apple notarization"
     else:
-        raise ValueError(f"Unrecognized macOS signing metadata: {mac_signing!r}")
+        raise ValueError(f"Unrecognized or inconsistent macOS signing metadata: {mac_signing!r}")
 
     linux_signing = str(builds["linux"].get("signing", ""))
     if "unsigned" not in linux_signing.lower():
