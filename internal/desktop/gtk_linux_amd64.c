@@ -94,6 +94,7 @@ enum {
   MD_CAIRO_FORMAT_ARGB32 = 0,
   MD_CAIRO_FILTER_NEAREST = 3,
   MD_G_TYPE_STRING = 64,
+  MD_G_SIGNAL_MATCH_DATA = 16,
   MD_G_BUS_TYPE_SESSION = 2,
   MD_G_DBUS_CALL_FLAGS_NONE = 0,
   MD_APP_INDICATOR_CATEGORY_APPLICATION_STATUS = 0,
@@ -117,14 +118,16 @@ typedef struct {
   void (*g_set_prgname)(const char* prgname);
   void (*g_set_application_name)(const char* application_name);
   guint (*g_timeout_add)(guint interval, GSourceFunc function, gpointer data);
+  guint (*g_idle_add)(GSourceFunc function, gpointer data);
   gboolean (*g_source_remove)(guint tag);
-  void (*g_main_context_invoke)(void* context, GSourceFunc function, gpointer data);
   char* (*g_filename_to_uri)(const char* filename, const char* hostname, GError** error);
   void* (*g_variant_new)(const char* format_string, ...);
 
   // GObject
   gulong (*g_signal_connect_data)(gpointer instance, const char* detailed_signal, GCallback c_handler,
                                   gpointer data, GClosureNotify destroy_data, int connect_flags);
+  guint (*g_signal_handlers_disconnect_matched)(gpointer instance, int mask, guint signal_id,
+                                                guint32 detail, void* closure, gpointer func, gpointer data);
   void (*g_object_set)(gpointer object, const char* first_property_name, ...);
   void (*g_object_get)(gpointer object, const char* first_property_name, ...);
   void (*g_object_unref)(gpointer object);
@@ -371,12 +374,13 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(glib, g_set_prgname);
   LOAD_SYM(glib, g_set_application_name);
   LOAD_SYM(glib, g_timeout_add);
+  LOAD_SYM(glib, g_idle_add);
   LOAD_SYM(glib, g_source_remove);
-  LOAD_SYM(glib, g_main_context_invoke);
   LOAD_SYM(glib, g_filename_to_uri);
   LOAD_SYM(glib, g_variant_new);
 
   LOAD_SYM(gobject, g_signal_connect_data);
+  LOAD_SYM(gobject, g_signal_handlers_disconnect_matched);
   LOAD_SYM(gobject, g_object_set);
   LOAD_SYM(gobject, g_object_get);
   LOAD_SYM(gobject, g_object_unref);
@@ -604,6 +608,9 @@ typedef struct {
   int high_contrast;
   int headless_test;
   int loop_running;
+  int quit_requested;
+  pthread_t main_thread;
+  uintptr_t generation;
   int start_id;
   int stop_id;
   int exit_id;
@@ -765,9 +772,14 @@ static void mdRoundedRect(void* cr, double x, double y, double w, double h, doub
   gGtk.cairo_close_path(cr);
 }
 
+static int mdIsActiveMainThread(void) {
+  return __atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) != 0 &&
+         pthread_equal(pthread_self(), gApp.main_thread) != 0;
+}
+
 static gboolean mdOnRootDraw(void* widget, void* cr, gpointer user_data) {
   (void)user_data;
-  if (gApp.high_contrast) {
+  if (!mdIsActiveMainThread() || gApp.high_contrast) {
     return 0;
   }
   GtkAllocation alloc;
@@ -798,6 +810,9 @@ static gboolean mdOnRootDraw(void* widget, void* cr, gpointer user_data) {
 
 static gboolean mdOnQrDraw(void* widget, void* cr, gpointer user_data) {
   (void)user_data;
+  if (!mdIsActiveMainThread()) {
+    return 0;
+  }
   GtkAllocation alloc;
   gGtk.gtk_widget_get_allocation(widget, &alloc);
   double w = (double)alloc.width;
@@ -833,12 +848,18 @@ static void mdOnSizeAllocate(void* widget, GtkAllocation* allocation, gpointer u
   (void)widget;
   (void)allocation;
   (void)user_data;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   md_ui_layout();
 }
 
 static gboolean mdOnWindowDelete(void* widget, void* event, gpointer user_data) {
   (void)event;
   (void)user_data;
+  if (!mdIsActiveMainThread()) {
+    return 1;
+  }
   if (gApp.indicator != NULL) {
     gGtk.gtk_widget_hide(widget);
     return 1;
@@ -848,30 +869,35 @@ static gboolean mdOnWindowDelete(void* widget, void* event, gpointer user_data) 
 }
 
 static gboolean mdOnTimer(gpointer user_data) {
-  (void)user_data;
-  if (!gApp.initialized) {
+  uintptr_t gen = (uintptr_t)user_data;
+  if (!mdIsActiveMainThread() || gen != __atomic_load_n(&gApp.generation, __ATOMIC_ACQUIRE)) {
     return 0;
   }
   goMicDropTick();
-  return 1;
+  return __atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) ? 1 : 0;
 }
 
 static gboolean mdOnWake(gpointer user_data) {
-  (void)user_data;
-  if (gApp.initialized) {
+  uintptr_t gen = (uintptr_t)user_data;
+  if (mdIsActiveMainThread() && gen == __atomic_load_n(&gApp.generation, __ATOMIC_ACQUIRE)) {
     goMicDropTick();
   }
   return 0;
 }
 
 static gboolean mdOnWakeTest(gpointer user_data) {
-  (void)user_data;
-  goMicDropDrainTestQueue();
+  uintptr_t gen = (uintptr_t)user_data;
+  if (mdIsActiveMainThread() && gen == __atomic_load_n(&gApp.generation, __ATOMIC_ACQUIRE)) {
+    goMicDropDrainTestQueue();
+  }
   return 0;
 }
 
 static void mdOnButtonClicked(void* widget, gpointer user_data) {
   (void)widget;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   MdControlEntry* entry = (MdControlEntry*)user_data;
   if (entry != NULL && !entry->suppress_events) {
     goMicDropEvent(entry->id, MD_EVENT_CLICK);
@@ -880,6 +906,9 @@ static void mdOnButtonClicked(void* widget, gpointer user_data) {
 
 static void mdOnCheckToggled(void* widget, gpointer user_data) {
   (void)widget;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   MdControlEntry* entry = (MdControlEntry*)user_data;
   if (entry != NULL && !entry->suppress_events) {
     goMicDropEvent(entry->id, MD_EVENT_CLICK);
@@ -888,7 +917,7 @@ static void mdOnCheckToggled(void* widget, gpointer user_data) {
 
 static gboolean mdOnCheckDrawAfter(void* widget, void* cr, gpointer user_data) {
   (void)user_data;
-  if (gApp.high_contrast || !gGtk.gtk_toggle_button_get_active(widget)) {
+  if (!mdIsActiveMainThread() || gApp.high_contrast || !gGtk.gtk_toggle_button_get_active(widget)) {
     return 0;
   }
   GtkAllocation alloc;
@@ -909,6 +938,9 @@ static gboolean mdOnCheckDrawAfter(void* widget, void* cr, gpointer user_data) {
 
 static void mdOnPopupChanged(void* widget, gpointer user_data) {
   (void)widget;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   MdControlEntry* entry = (MdControlEntry*)user_data;
   if (entry != NULL && !entry->suppress_events) {
     goMicDropEvent(entry->id, MD_EVENT_CHANGE);
@@ -917,6 +949,9 @@ static void mdOnPopupChanged(void* widget, gpointer user_data) {
 
 static void mdOnListSelectionChanged(void* selection, gpointer user_data) {
   (void)selection;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   MdControlEntry* entry = (MdControlEntry*)user_data;
   if (entry != NULL && !entry->suppress_events) {
     goMicDropEvent(entry->id, MD_EVENT_CHANGE);
@@ -926,8 +961,11 @@ static void mdOnListSelectionChanged(void* selection, gpointer user_data) {
 static void mdOnListRowActivated(void* tree_view, void* path, void* column, gpointer user_data) {
   (void)path;
   (void)column;
+  if (!mdIsActiveMainThread()) {
+    return;
+  }
   MdControlEntry* entry = (MdControlEntry*)user_data;
-  if (entry != NULL && gGtk.gtk_widget_get_sensitive(tree_view)) {
+  if (entry != NULL && !entry->suppress_events && gGtk.gtk_widget_get_sensitive(tree_view)) {
     goMicDropEvent(entry->id, MD_EVENT_DBLCLK);
   }
 }
@@ -935,19 +973,25 @@ static void mdOnListRowActivated(void* tree_view, void* path, void* column, gpoi
 static void mdOnTrayOpen(void* menu_item, gpointer user_data) {
   (void)menu_item;
   (void)user_data;
-  goMicDropShow();
+  if (mdIsActiveMainThread()) {
+    goMicDropShow();
+  }
 }
 
 static void mdOnTrayToggle(void* menu_item, gpointer user_data) {
   (void)menu_item;
   (void)user_data;
-  goMicDropEvent(gApp.toggle_target_id, MD_EVENT_CLICK);
+  if (mdIsActiveMainThread()) {
+    goMicDropEvent(gApp.toggle_target_id, MD_EVENT_CLICK);
+  }
 }
 
 static void mdOnTrayQuit(void* menu_item, gpointer user_data) {
   (void)menu_item;
   (void)user_data;
-  goMicDropEvent(gApp.exit_id, MD_EVENT_CLICK);
+  if (mdIsActiveMainThread()) {
+    goMicDropEvent(gApp.exit_id, MD_EVENT_CLICK);
+  }
 }
 
 static void mdAddClass(void* widget, const char* cls) {
@@ -1039,6 +1083,11 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
     gApp.gtk_inited = 1;
   }
 
+  gApp.main_thread = pthread_self();
+  uintptr_t gen = __atomic_add_fetch(&gApp.generation, 1, __ATOMIC_SEQ_CST);
+  gApp.quit_requested = 0;
+  gApp.loop_running = 0;
+
   gApp.high_contrast = mdDetectHighContrast();
   mdInstallCss(gApp.high_contrast);
 
@@ -1081,10 +1130,10 @@ int md_app_init(const char* window_title, int headless_test, int start_id, int s
   gApp.window = window;
   gApp.root_scroll = root_scroll;
   gApp.fixed = fixed;
-  gApp.initialized = 1;
+  __atomic_store_n(&gApp.initialized, 1, __ATOMIC_RELEASE);
 
   mdSetupTray();
-  gApp.timer_id = gGtk.g_timeout_add(250, mdOnTimer, NULL);
+  gApp.timer_id = gGtk.g_timeout_add(250, mdOnTimer, (gpointer)gen);
   return 1;
 }
 
@@ -1104,7 +1153,7 @@ static void mdFlushEvents(void) {
 }
 
 static void mdCheckAllContainers(void) {
-  if (!gApp.initialized) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
     return;
   }
   if (gApp.window != NULL) {
@@ -1124,7 +1173,7 @@ static void mdCheckAllContainers(void) {
 }
 
 static void mdSyncLayout(void) {
-  if (!gGtk.loaded || !gApp.gtk_inited || !gApp.initialized) {
+  if (!gGtk.loaded || !gApp.gtk_inited || !__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
     return;
   }
   if (gApp.headless_test && gApp.window != NULL) {
@@ -1139,7 +1188,7 @@ static void mdSyncLayout(void) {
 }
 
 void md_app_show_window(int activate) {
-  if (!gApp.initialized || gApp.window == NULL) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.window == NULL) {
     return;
   }
   gGtk.gtk_widget_show(gApp.window);
@@ -1154,7 +1203,7 @@ void md_app_show_window(int activate) {
 }
 
 void md_app_hide_window(void) {
-  if (!gApp.initialized || gApp.window == NULL) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.window == NULL) {
     return;
   }
   if (gApp.headless_test) {
@@ -1166,7 +1215,7 @@ void md_app_hide_window(void) {
 }
 
 void md_app_minimize_window(void) {
-  if (!gApp.initialized || gApp.window == NULL) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.window == NULL) {
     return;
   }
   if (gApp.headless_test) {
@@ -1179,7 +1228,7 @@ void md_app_minimize_window(void) {
 }
 
 void md_app_run(void) {
-  if (!gApp.initialized) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE) || gApp.quit_requested) {
     return;
   }
   gApp.loop_running = 1;
@@ -1188,6 +1237,7 @@ void md_app_run(void) {
 }
 
 void md_app_stop_loop(void) {
+  gApp.quit_requested = 1;
   if (gApp.loop_running) {
     gApp.loop_running = 0;
     gGtk.gtk_main_quit();
@@ -1195,14 +1245,28 @@ void md_app_stop_loop(void) {
 }
 
 void md_app_cleanup(void) {
-  if (!gApp.initialized) {
+  if (!__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
     return;
   }
-  gApp.initialized = 0;
+  __atomic_store_n(&gApp.initialized, 0, __ATOMIC_RELEASE);
+  gApp.quit_requested = 1;
   if (gApp.timer_id != 0) {
     gGtk.g_source_remove(gApp.timer_id);
     gApp.timer_id = 0;
   }
+
+  MdControlEntry* controls = gApp.controls;
+  gApp.controls = NULL;
+  for (MdControlEntry* cur = controls; cur != NULL; cur = cur->next) {
+    cur->suppress_events = 1;
+    if (cur->selection != NULL) {
+      gGtk.g_signal_handlers_disconnect_matched(cur->selection, MD_G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, cur);
+    }
+    if (cur->widget != NULL) {
+      gGtk.g_signal_handlers_disconnect_matched(cur->widget, MD_G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, cur);
+    }
+  }
+
   if (gApp.qr_surface != NULL) {
     gGtk.cairo_surface_destroy(gApp.qr_surface);
     gApp.qr_surface = NULL;
@@ -1228,26 +1292,27 @@ void md_app_cleanup(void) {
     gApp.root_scroll = NULL;
     gApp.fixed = NULL;
   }
-  MdControlEntry* cur = gApp.controls;
-  gApp.controls = NULL;
-  while (cur != NULL) {
-    MdControlEntry* next = cur->next;
-    mdFreePopupItems(cur);
-    free(cur);
-    cur = next;
+
+  while (controls != NULL) {
+    MdControlEntry* next = controls->next;
+    mdFreePopupItems(controls);
+    free(controls);
+    controls = next;
   }
   mdFlushEvents();
 }
 
 void md_app_dispatch_wake(void) {
-  if (gGtk.loaded && gApp.gtk_inited) {
-    gGtk.g_main_context_invoke(NULL, mdOnWake, NULL);
+  if (__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
+    uintptr_t gen = __atomic_load_n(&gApp.generation, __ATOMIC_ACQUIRE);
+    gGtk.g_idle_add(mdOnWake, (gpointer)gen);
   }
 }
 
 void md_app_wake_test(void) {
-  if (gGtk.loaded && gApp.gtk_inited) {
-    gGtk.g_main_context_invoke(NULL, mdOnWakeTest, NULL);
+  if (__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
+    uintptr_t gen = __atomic_load_n(&gApp.generation, __ATOMIC_ACQUIRE);
+    gGtk.g_idle_add(mdOnWakeTest, (gpointer)gen);
   }
 }
 

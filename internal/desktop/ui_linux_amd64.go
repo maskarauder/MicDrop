@@ -130,25 +130,25 @@ var uiTestQueue = make(chan func(), 32)
 
 //export goMicDropTick
 func goMicDropTick() {
-	if activeWindow != nil {
-		activeWindow.tick()
+	if u := activeWindow; u != nil && !u.destroyed {
+		u.tick()
 	}
 }
 
 //export goMicDropShow
 func goMicDropShow() {
-	if activeWindow != nil {
-		if activeWindow.controller.Snapshot().Pending.ID != "" {
-			activeWindow.selectPage(2)
+	if u := activeWindow; u != nil && !u.destroyed {
+		if u.controller.Snapshot().Pending.ID != "" {
+			u.selectPage(2)
 		}
-		activeWindow.show()
+		u.show()
 	}
 }
 
 //export goMicDropEvent
 func goMicDropEvent(id C.int, kind C.int) {
 	u := activeWindow
-	if u == nil {
+	if u == nil || u.destroyed {
 		return
 	}
 	ctrlID := int(id)
@@ -250,11 +250,15 @@ func runWindow(backend Backend, directory string, background bool, headlessTest 
 		closed:       make(chan struct{}),
 		labelID:      1000,
 	}
-	activeWindow = u
-	defer func() {
-		activeWindow = nil
+	detachWindow := sync.OnceFunc(func() {
+		u.destroyed = true
+		if activeWindow == u {
+			activeWindow = nil
+		}
 		close(u.closed)
-	}()
+	})
+	activeWindow = u
+	defer detachWindow()
 
 	cTitle := C.CString("MicDrop " + version.Current().Version)
 	var errBuf [256]C.char
@@ -267,7 +271,10 @@ func runWindow(backend Backend, directory string, background bool, headlessTest 
 	if ok == 0 {
 		return errors.New(C.GoString(&errBuf[0]))
 	}
-	defer C.md_app_cleanup()
+	defer func() {
+		detachWindow()
+		C.md_app_cleanup()
+	}()
 
 	if reopenCh != nil || termCh != nil {
 		go func() {
