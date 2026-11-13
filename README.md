@@ -36,11 +36,11 @@ Download matching desktop and phone packages from the latest release on the
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
+| **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Authenticode-signed per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
 | **Android 12+ (arm64)** | `MicDrop-*-android-arm64-dev.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
-| **iPhone (iOS 17+ arm64)** | `MicDrop-*-ios-arm64-unsigned.ipa` | Sideload with your Apple ID via AltStore, SideStore, Sideloadly, or Xcode ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
-| **macOS 14.2+ (Apple Silicon arm64)** | Built from source / CI artifact (`macos-arm64-app`, `macos-arm64-host`) | Experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md)); Apple Silicon hardware feedback welcome |
-| **Linux (x64)** | Built from source / CI artifact (`linux-x64-host`) | GTK3 desktop GUI & PipeWire/PulseAudio CLI host ([desktop guide](docs/LINUX_DESKTOP.md), [audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
+| **iPhone (iOS 17+ arm64)** | TestFlight invite or `MicDrop-*-ios-arm64-unsigned.ipa` | Install via Apple TestFlight or sideload with your Apple ID via Sideloadly / iloader ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
+| **macOS 14.2+ (Apple Silicon arm64)** | `MicDrop-*-macos-arm64-app.zip` or `MicDrop-*-macos-arm64-host.tar.gz` | Developer ID signed & Apple-notarized experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md)); Apple Silicon hardware feedback welcome |
+| **Linux (x64)** | `MicDrop-*-linux-x64-host.tar.gz` | GTK3 desktop GUI & PipeWire/PulseAudio CLI host ([desktop guide](docs/LINUX_DESKTOP.md), [audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
 
 ### Setup in 4 Steps
 
@@ -53,8 +53,9 @@ Download matching desktop and phone packages from the latest release on the
    - **Linux (x64):** Run `./micdrop-host desktop` (or
      `./micdrop-host desktop --install-launcher` to add an application menu
      entry; [Linux guide](docs/LINUX_DESKTOP.md)).
-2. **Install on your phone:** Install the matching Android `.apk` or sideload
-   the iPhone `.ipa` from the same release version.
+2. **Install on your phone:** Install the matching Android `.apk`, install via
+   **TestFlight** on iPhone, or sideload the iPhone `.ipa` from the same release
+   version.
 3. **Pair your phone:** Open the **Phones** tab and click **Pair a phone** in
    the desktop app, scan the QR code (or paste the link) on your phone, verify
    the request ID, and click **Approve** on your computer.
@@ -104,13 +105,15 @@ macOS AppKit (`MicDrop.app`):
 
 ## Things to Know
 
-- **Unsigned / ad-hoc beta builds:** Windows packages are not Authenticode-signed
-  yet, so Windows SmartScreen may prompt on first run (*More info → Run anyway*).
-  `MicDrop.app` on macOS uses ad-hoc code signing rather than Developer ID
-  notarization, so macOS Gatekeeper may require *System Settings → Privacy &
-  Security → Open Anyway* on downloaded archives. The Android APK is sideloaded
-  rather than from Google Play, and the iPhone IPA is unsigned—signing with a
-  free Apple ID requires refreshing every 7 days.
+- **Package signing & platform prompts:** Official Windows x64 release packages
+  are **Authenticode-signed and timestamped**, though newly issued certificates
+  may still show a Windows SmartScreen download-reputation prompt on first run
+  (*More info → Run anyway*) until download reputation builds. Apple Silicon
+  macOS release packages (`MicDrop.app` and `micdrop-host`) are **Developer ID
+  signed and Apple-notarized**, while Linux x64 archives are unsigned. On mobile,
+  the Android APK is sideloaded rather than from Google Play, and the iPhone app
+  is available via **TestFlight** or by sideloading the unsigned IPA (signing
+  with a free Apple ID requires refreshing every 7 days).
 - **Bluetooth audio behavior:** Bluetooth headphones add device buffering delay,
   and using a classic Bluetooth headset's microphone can switch headphone
   playback to voice call quality depending on the headset and OS.

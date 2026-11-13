@@ -30,10 +30,15 @@ audio driver, or change the VPS. Phone microphone return still requires a
 separately installed virtual cable. Standard installer icons and the existing
 MicDrop text branding are placeholders; no generated artwork is included.
 
-These are unsigned development packages. Packaging does not establish a verified
-publisher or remove Windows/browser reputation warnings. Production signing remains separate work. For a reported malware detection,
-follow the [Windows security guide](WINDOWS_SECURITY.md); packaging or a clean CI
-file scan cannot guarantee that another PC will accept installation.
+Official `main`-branch and release packages (`setup.exe`, `unins000.exe`,
+`MicDrop-maintenance.exe`, `MicDrop.exe`, and `micdrop_rtc.dll`) are
+Authenticode-signed and timestamped via Microsoft Azure Artifact Signing, while
+local developer and pull-request builds remain unsigned. Authenticode signing
+establishes publisher identity and satisfies Smart App Control signature checks,
+though newly issued certificates still build Windows SmartScreen download
+reputation gradually. For a reported malware detection, follow the
+[Windows security guide](WINDOWS_SECURITY.md); code signing or a clean CI file
+scan cannot guarantee that another PC will accept installation.
 MicDrop is licensed under [MPL-2.0](../LICENSE); public distribution also requires
 [accessible matching source and reviewed dependency notices](LICENSING.md).
 
@@ -145,6 +150,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows payload preparation failed.' }
     -PayloadDirectory build/host `
     -OutputDirectory build/windows-installer
 ```
+
+On non-PR CI runs when the Azure Artifact Signing secrets are configured, CI signs
+`build/host/MicDrop.exe` and `build/host/micdrop_rtc.dll` beforehand via
+`tools/windows_signing.py` and passes `-SignInstaller` to
+`build_windows_installer.ps1` so `MicDrop-maintenance.exe` (before
+`payload-manifest.json` hashing), `unins000.exe`, and the outer setup executable
+are Authenticode-signed and RFC 3161 timestamped. Local developer builds omit
+`-SignInstaller` and compile cleanly unsigned.
 
 The build uses a pinned, checksum-verified **Inno Setup 7.1.0** compiler. Its source,
 release downloads and license are maintained by
