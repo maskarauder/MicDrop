@@ -10,10 +10,10 @@ clean-system acceptance and security-review status.
 ## Shared version
 
 Edit `internal/version/version.properties` and add matching notes at
-`docs/releases/<version>.md`. Windows, its installer, Android and the draft
-package names read that same version; the iPhone build uses it through
-`tools/ios_version.py`. Current metadata is `0.1.0-beta.2` with Android version
-code `3`.
+`docs/releases/<version>.md`. Windows, Linux, macOS, the Windows installer,
+Android and the draft package names read that same version; `MicDrop.app` uses
+`tools/macos_app_bundle.py` and the iPhone build uses `tools/ios_version.py`.
+Current metadata is `0.1.0-beta.3` with Android version code `4`.
 
 Use `MAJOR.MINOR.PATCH`, optionally followed by `-alpha.N`, `-beta.N` or `-rc.N`.
 Each numeric Windows component is at most 65535. Increase `android_version_code`
@@ -27,16 +27,19 @@ reusing its tag.
 python tools/release_version.py
 ```
 
-`windows-host.exe version` prints the embedded version, Android version code,
-source revision, modified-tree flag and platform as JSON. The Windows title and
-session log header also include the app version. Android and iPhone display
-their version and source revision in reports.
+`windows-host.exe version` and `micdrop-host version` print the embedded
+version, Android version code, source revision, modified-tree flag and platform
+as JSON. Desktop window titles and session log headers also include the app
+version. Android and iPhone display their version and source revision in
+reports.
 
-These drafts deliberately retain `com.maskarauder.micdrop.dev` and the existing
-stable development signing secret. The APK upgrades the currently installed
-development app without changing its pairing/settings. It remains a debuggable
-development APK; it is not a production-signed Android release. Windows packages
-remain unsigned, and the optional iPhone IPA is unsigned for Apple ID sideloading.
+These drafts deliberately retain `com.maskarauder.micdrop.dev` on Android and
+iPhone and the existing stable Android development signing secret. The APK
+upgrades the currently installed development app without changing its
+pairing/settings. It remains a debuggable development APK; it is not a
+production-signed Android release. Windows and Linux packages remain unsigned,
+macOS arm64 packages (`com.maskarauder.micdrop.mac`) are ad-hoc signed without
+notarization, and the optional iPhone IPA is unsigned for Apple ID sideloading.
 No new signing secret is needed for draft assembly, and signing keys are never
 uploaded. The Android build retains its installable APK only when the stable
 development signer (`MICDROP_DEBUG_KEYSTORE_BASE64`) is configured and verified.
@@ -53,10 +56,11 @@ development signer (`MICDROP_DEBUG_KEYSTORE_BASE64`) is configured and verified.
    enter `build_run_id` (and optional `ios_run_id`), and run the workflow.
 4. The workflow validates the source run(s), commit SHA, version, notes and
    retained artifact manifests (`windows-x64-harness-retained`,
-   `windows-x64-installer-retained`, `android-apk-retained`, and optional
-   `ios-ipa-retained`). It
-   creates a draft marked **INCOMPLETE**, then the Windows and Linux jobs verify
-   and upload their packages directly to that draft.
+   `windows-x64-installer-retained`, `linux-x64-host-retained`,
+   `macos-arm64-app-retained`, `macos-arm64-host-retained`,
+   `android-apk-retained`, and optional `ios-ipa-retained`). It
+   creates a draft marked **INCOMPLETE**, then the Windows, Linux, and macOS
+   jobs verify and upload their packages directly to that draft.
 5. The final job requires every selected package, checks GitHub's SHA-256 digests,
    adds `release-manifest.json` and `SHA256SUMS`, then marks the draft ready for
    human review. **It stays a draft and is not marked as Latest.** Do not publish
@@ -77,10 +81,15 @@ scoped to the draft workflow, while normal CI builds retain read-only permission
 
 | Asset | Purpose |
 | --- | --- |
-| `MicDrop-<version>-windows-x64-setup.exe` | Complete per-user installer |
-| `MicDrop-<version>-windows-x64-portable.zip` | Desktop app/DLL, required notices, README and beta guide |
-| `MicDrop-<version>-android-arm64-dev.apk` | Existing development identity, with the new version code |
+| `MicDrop-<version>-windows-x64-setup.exe` | Complete per-user Windows installer |
+| `MicDrop-<version>-windows-x64-portable.zip` | Windows desktop app/DLL, required notices, README and beta guide |
 | `MicDrop-<version>-windows-build.json` | Windows source/build identity and package hashes |
+| `MicDrop-<version>-linux-x64-host.tar.gz` | Linux x64 CLI + GTK3 desktop host, WebRTC `.so`, and notices |
+| `MicDrop-<version>-linux-build.json` | Linux source/build identity and archive hash |
+| `MicDrop-<version>-macos-arm64-app.zip` | Ad-hoc signed macOS 14.2+ arm64 `MicDrop.app` desktop bundle |
+| `MicDrop-<version>-macos-arm64-host.tar.gz` | Ad-hoc signed macOS 14.2+ arm64 CLI host, WebRTC `.dylib`, and notices |
+| `MicDrop-<version>-macos-build.json` | macOS bundle/source identity, minimum OS, and package hashes |
+| `MicDrop-<version>-android-arm64-dev.apk` | Existing development identity, with the new version code |
 | `MicDrop-<version>-android-build.json` | Android identity, public signer fingerprint and package hash |
 | `MicDrop-<version>-ios-arm64-unsigned.ipa` | Optional unsigned iPhone bundle for Apple ID sideloading |
 | `MicDrop-<version>-ios-build.json` | Optional iPhone bundle identity, minimum iOS version and IPA hash |
@@ -88,18 +97,19 @@ scoped to the draft workflow, while normal CI builds retain read-only permission
 | `SHA256SUMS` | Hashes for all assets except the checksum file itself |
 
 The portable archive is built from the installer's curated payload list, not a
-live installation or user profile. Windows executables and installer metadata
-must match the selected version and source revision. Android package name,
-version name/code and APK signature are inspected before upload. The normal CI
-build exercises this staging path on both actual runner platforms without
-creating a release or uploading release assets.
+live installation or user profile. Windows, Linux, and macOS executables,
+`MicDrop.app` metadata/ad-hoc signatures, and installer metadata must match the
+selected version and source revision. Android package name, version name/code
+and APK signature are inspected before upload. The normal CI build exercises
+this staging path across Windows, Linux, macOS, and Android without creating a
+release or uploading release assets.
 
 ### Include an optional iPhone IPA
 
 To include the optional iPhone assets in **Assemble draft release**, supply the
 `ios_run_id` input from a successful **iPhone app** (`ios.yml`) run on the
 **exact same `main` commit** as `build_run_id` (leave `ios_run_id` blank for a
-Windows/Android-only draft). A PR merge-build IPA or a run from another commit
+desktop + Android draft). A PR merge-build IPA or a run from another commit
 is rejected before creating or modifying the draft.
 
 The workflow downloads `ios-ipa-retained` from that Apple run and verifies the
@@ -180,11 +190,13 @@ assembling a draft does not validate audio, handoffs, or new hardware.
 
 ## Volunteer beta
 
-A sideloaded Windows/Android/iPhone beta can use these development packages.
-Production signing and store enrollment are separate release work. Tell testers
-that Windows is unsigned, Android is a debuggable development APK, and iPhone is
-an unsigned IPA sideloaded with their own Apple ID. Preserve the stable Android
-signer (`MICDROP_DEBUG_KEYSTORE_BASE64`); replacing it prevents in-place updates.
+A sideloaded Windows/Linux/macOS/Android/iPhone beta can use these development
+packages. Production signing, notarization, and store enrollment are separate
+release work. Tell testers that Windows and Linux are unsigned, macOS is ad-hoc
+signed without notarization, Android is a debuggable development APK, and iPhone
+is an unsigned IPA sideloaded with their own Apple ID. Preserve the stable
+Android signer (`MICDROP_DEBUG_KEYSTORE_BASE64`); replacing it prevents in-place
+updates.
 
 Choose a new version/code and notes before the build. A draft already tied to one
 source build cannot be reused for a different build.
@@ -197,7 +209,7 @@ workflow runs or dispatch fresh `main` builds:
 ```powershell
 $ErrorActionPreference = 'Stop'
 $MicDropRepo = 'maskarauder/MicDrop'
-$MicDropVersion = '0.1.0-beta.2'
+$MicDropVersion = '0.1.0-beta.3'
 $MicDropTag = "v$MicDropVersion"
 
 gh workflow run build.yml --repo $MicDropRepo --ref main

@@ -95,8 +95,9 @@ def git_revision(root):
     return "local"
 
 
-def derive_bundle_identity(root=release_version.ROOT, revision=None):
-    shared = release_version.read(root)
+def derive_bundle_identity(root=release_version.ROOT, revision=None, *, shared=None):
+    if shared is None:
+        shared = release_version.read(root)
     version_name = shared["version"]
     rev = git_revision(root) if revision is None else revision
     if not REVISION_RE.match(rev):
@@ -218,6 +219,7 @@ def build_app_bundle(
     bundle_id=DEFAULT_BUNDLE_ID,
     minimum_os=DEFAULT_MIN_MACOS,
     revision=None,
+    shared_identity=None,
 ):
     root = Path(root).resolve()
     output_app = Path(output_app)
@@ -227,7 +229,7 @@ def build_app_bundle(
     if output_app.exists():
         shutil.rmtree(output_app)
 
-    identity = derive_bundle_identity(root=root, revision=revision)
+    identity = derive_bundle_identity(root=root, revision=revision, shared=shared_identity)
     info = make_info_plist(identity, bundle_id=bundle_id, minimum_os=minimum_os)
 
     contents = output_app / "Contents"
@@ -263,6 +265,7 @@ def build_app_bundle(
         bundle_id=bundle_id,
         minimum_os=minimum_os,
         revision=identity["revision"],
+        shared_identity=shared_identity,
     )
     return output_app
 
@@ -311,6 +314,7 @@ def check_app_directory(
     bundle_id=DEFAULT_BUNDLE_ID,
     minimum_os=DEFAULT_MIN_MACOS,
     revision=None,
+    shared_identity=None,
 ):
     app_dir = Path(app_dir)
     minimum = dotted(minimum_os)
@@ -336,7 +340,7 @@ def check_app_directory(
     except (ValueError, xml.parsers.expat.ExpatError) as exc:
         raise ValueError(f"Contents/Info.plist is unreadable: {exc}") from None
 
-    expected_identity = derive_bundle_identity(root=Path(root), revision=revision)
+    expected_identity = derive_bundle_identity(root=Path(root), revision=revision, shared=shared_identity)
     _validate_info_dict(
         info,
         expected_identity=expected_identity,
@@ -385,11 +389,12 @@ def check_app_zip(
     bundle_id=DEFAULT_BUNDLE_ID,
     minimum_os=DEFAULT_MIN_MACOS,
     revision=None,
+    shared_identity=None,
 ):
     zip_path = Path(zip_path)
     reject_link(zip_path)
     minimum = dotted(minimum_os)
-    expected_identity = derive_bundle_identity(root=Path(root), revision=revision)
+    expected_identity = derive_bundle_identity(root=Path(root), revision=revision, shared=shared_identity)
 
     with zipfile.ZipFile(zip_path) as archive:
         items = archive.infolist()
@@ -473,6 +478,7 @@ def zip_app_bundle(
     bundle_id=DEFAULT_BUNDLE_ID,
     minimum_os=DEFAULT_MIN_MACOS,
     revision=None,
+    shared_identity=None,
 ):
     app_dir = Path(app_dir)
     output_zip = Path(output_zip)
@@ -482,6 +488,7 @@ def zip_app_bundle(
         bundle_id=bundle_id,
         minimum_os=minimum_os,
         revision=revision,
+        shared_identity=shared_identity,
     )
     reject_link(output_zip)
     output_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -512,6 +519,7 @@ def zip_app_bundle(
         bundle_id=bundle_id,
         minimum_os=minimum_os,
         revision=revision,
+        shared_identity=shared_identity,
     )
 
 

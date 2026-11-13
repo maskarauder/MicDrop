@@ -1,42 +1,54 @@
 # MicDrop beta testing
 
-MicDrop streams Windows audio to an Android phone or iPhone and its headphones.
-It can also send the phone or a supported headset microphone back to Windows.
+MicDrop streams desktop audio (Windows, Linux, or macOS) to an Android phone or
+iPhone and its headphones. It can also send the phone or a supported headset
+microphone back to the computer.
 
-This is an early volunteer beta. Windows packages are unsigned, Android is a
+This is an early volunteer beta. Windows and Linux packages are unsigned, macOS
+packages are ad-hoc signed without Apple Developer ID notarization, Android is a
 sideloaded development app, and the optional iPhone build is an unsigned IPA
 sideloaded with your own Apple ID. Send installation blocks or security detections
 to the maintainer; do not disable antivirus or Play Protect to install it.
 
 ## What you need
 
-- A Windows 11 x64 PC and an Android 12+ arm64 phone or an iPhone running iOS 17+
-  (arm64).
-- Both devices on the same trusted home network for the first test. The PC may
-  use Ethernet; avoid guest Wi-Fi that isolates devices.
-- The matching Windows installer and Android APK (or optional unsigned iPhone IPA)
-  supplied by the maintainer.
+- A Windows 11 x64 PC, a Linux x64 PC (PulseAudio or PipeWire-Pulse, with GTK 3
+  for the desktop GUI), or an Apple Silicon Mac running macOS 14.2+ (arm64), plus
+  an Android 12+ arm64 phone or an iPhone running iOS 17+ (arm64).
+- Both devices on the same trusted home network for the first test. The computer
+  may use Ethernet; avoid guest Wi-Fi that isolates devices.
+- The matching desktop host package and Android APK (or optional unsigned iPhone
+  IPA) supplied by the maintainer.
 - Optional headphones. Test the phone speaker first to establish a baseline.
 
 No developer tools, USB debugging, account, or internet connection are needed
 for local Android playback. Android may ask for permission to install from the
 browser or file manager used to open the APK; allow that source only for
 installation, then turn the permission off again. Sideloading on iPhone requires
-Apple's web (non-Microsoft Store) iTunes/iCloud USB drivers, an Apple ID for
-7-day free developer signing, and internet access once to trust the developer
-certificate on the phone.
+Apple's web (non-Microsoft Store) iTunes/iCloud USB drivers (on Windows), an
+Apple ID for 7-day free developer signing, and internet access once to trust the
+developer certificate on the phone.
 
 ## Install and pair
 
-1. Run `MicDrop-<version>-windows-x64-setup.exe` as your normal Windows user.
-   It installs into `%LOCALAPPDATA%\Programs\MicDrop`. If using the portable ZIP instead,
-   extract the entire archive into a fresh folder and open `MicDrop.exe`.
-   The packaged `README.md` explains settings, logs, upgrades and removal.
-2. Open **MicDrop** from Start. Under **Audio**, choose the Windows playback
-   device whose audio you want to send. Leave microphone return disabled.
+1. Install or extract the desktop host for your platform:
+   - **Windows**: Run `MicDrop-<version>-windows-x64-setup.exe` as your normal
+     Windows user (`%LOCALAPPDATA%\Programs\MicDrop`), or extract
+     `MicDrop-<version>-windows-x64-portable.zip` into a fresh folder and open
+     `MicDrop.exe`.
+   - **macOS (Apple Silicon, 14.2+)**: Extract
+     `MicDrop-<version>-macos-arm64-app.zip` (for example with Finder or
+     `ditto -x -k`) and open `MicDrop.app`, or extract
+     `MicDrop-<version>-macos-arm64-host.tar.gz` for `./micdrop-host`.
+   - **Linux (x64)**: Extract `MicDrop-<version>-linux-x64-host.tar.gz` (`tar -xzf`)
+     and run `./micdrop-host desktop` (use `./micdrop-host desktop --install-launcher`
+     for an application-menu entry).
+2. Open **MicDrop**. Under **Audio**, choose the desktop playback device whose
+   audio you want to send. Leave microphone return disabled.
 3. Under **Connection**, select your physical home-network adapter and address,
-   save, and choose **Start host**. Permit the installed MicDrop app on your
-   trusted **Private** network if Windows asks. Do not disable the firewall.
+   save, and choose **Start host**. Permit MicDrop on your trusted local network
+   if your OS firewall or macOS Local Network / System Audio Recording prompt
+   asks. Do not disable your firewall.
 4. Install the matching phone build:
    - **Android**: Open `MicDrop-<version>-android-arm64-dev.apk` on the phone and
      install it. For an existing development installation, update it in place. If

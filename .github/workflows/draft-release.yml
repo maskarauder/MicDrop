@@ -57,6 +57,10 @@ jobs:
         include:
           - platform: windows
             os: windows-2022
+          - platform: linux
+            os: ubuntu-24.04
+          - platform: macos
+            os: macos-26
           - platform: android
             os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
@@ -86,7 +90,8 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           RUN_ATTEMPT: ${{ needs.prepare.outputs.run_attempt }}
         run: |
-          python - <<'PY'
+          if python3 -c 'import sys' >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
           import os
           from pathlib import Path
           root = Path(os.environ["RUNNER_TEMP"]).parent / "micdrop-artifacts" / os.environ["GITHUB_REPOSITORY_ID"]
@@ -94,6 +99,9 @@ jobs:
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as out:
               out.write(f"harness={(root / 'windows-x64-harness' / suffix).as_posix()}\n")
               out.write(f"installer={(root / 'windows-x64-installer' / suffix).as_posix()}\n")
+              out.write(f"linux_host={(root / 'linux-x64-host' / suffix).as_posix()}\n")
+              out.write(f"macos_app={(root / 'macos-arm64-app' / suffix).as_posix()}\n")
+              out.write(f"macos_host={(root / 'macos-arm64-host' / suffix).as_posix()}\n")
               out.write(f"android={(root / 'android-apk' / suffix).as_posix()}\n")
           PY
       - name: Download retained Windows harness bundle
@@ -112,6 +120,30 @@ jobs:
           path: ${{ steps.paths.outputs.installer }}
           run-id: ${{ inputs.build_run_id }}
           github-token: ${{ github.token }}
+      - name: Download retained Linux CLI host bundle
+        if: matrix.platform == 'linux'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-x64-host-retained
+          path: ${{ steps.paths.outputs.linux_host }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download retained macOS desktop app bundle
+        if: matrix.platform == 'macos'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-arm64-app-retained
+          path: ${{ steps.paths.outputs.macos_app }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download retained macOS CLI host bundle
+        if: matrix.platform == 'macos'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-arm64-host-retained
+          path: ${{ steps.paths.outputs.macos_host }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
       - name: Download retained Android APK bundle
         if: matrix.platform == 'android'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -126,7 +158,9 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           PACKAGE_PLATFORM: ${{ matrix.platform }}
-        run: python tools/draft_release.py upload --run-id "$BUILD_RUN_ID" --release-id "$RELEASE_ID" --platform "$PACKAGE_PLATFORM"
+        run: |
+          if python3 -c 'import sys' >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" tools/draft_release.py upload --run-id "$BUILD_RUN_ID" --release-id "$RELEASE_ID" --platform "$PACKAGE_PLATFORM"
       - name: Validate optional iPhone build run
         id: ios_meta
         if: matrix.platform == 'android' && inputs.ios_run_id != ''

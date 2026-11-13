@@ -9,12 +9,28 @@ from unittest.mock import patch
 import zipfile
 
 import draft_release as release
+import macos_app_bundle
+import package_unix_host
 import release_version as version
 import store_artifact
 from test_ios_bundle import APP, entries as ios_entries, info_plist as ios_info_plist
+import test_macos_app_bundle
+import test_package_unix_host
 
 SHA = "a" * 40
 IDENTITY = {"version": "0.1.0-beta.1", "android_version_code": 2}
+REQUIRED_SUFFIXES = (
+    "-windows-x64-setup.exe",
+    "-windows-x64-portable.zip",
+    "-windows-build.json",
+    "-linux-x64-host.tar.gz",
+    "-linux-build.json",
+    "-macos-arm64-app.zip",
+    "-macos-arm64-host.tar.gz",
+    "-macos-build.json",
+    "-android-arm64-dev.apk",
+    "-android-build.json",
+)
 RUN = {"id": 42, "run_attempt": 1, "head_sha": SHA, "status": "completed", "conclusion": "success",
        "event": "push", "head_branch": "main", "path": ".github/workflows/build.yml",
        "head_repository": {"full_name": "test/MicDrop"}, "html_url": "https://github.com/test/MicDrop/actions/runs/42"}
@@ -337,10 +353,128 @@ class DraftReleaseTests(unittest.TestCase):
         self.assertTrue(api.release["body"].startswith(release.marker(RUN)))
         self.assertIn("INCOMPLETE", api.release["body"])
 
+    def make_unix_tarball(self, platform):
+        stage_dir = self.root / f"stage-{platform}"
+        if stage_dir.exists():
+            for child in sorted(stage_dir.rglob("*"), reverse=True):
+                child.unlink() if child.is_file() else child.rmdir()
+            stage_dir.rmdir()
+        stage_dir.mkdir(parents=True)
+        exe = stage_dir / "micdrop-host"
+        if platform == "linux-x64":
+            exe.write_bytes(test_package_unix_host.fake_elf_x64(package_unix_host.ET_DYN))
+            lib = stage_dir / "libmicdrop_rtc.so"
+            lib.write_bytes(test_package_unix_host.fake_elf_x64(package_unix_host.ET_DYN))
+        else:
+            exe.write_bytes(test_macos_app_bundle.make_macho(macos_app_bundle.MH_EXECUTE))
+            lib = stage_dir / "libmicdrop_rtc.dylib"
+            lib.write_bytes(test_macos_app_bundle.make_macho(macos_app_bundle.MH_DYLIB))
+        exe.chmod(0o755)
+        lib.chmod(0o755)
+        for notice in package_unix_host.REQUIRED_NOTICES:
+            (stage_dir / notice).write_text(f"{notice}\n", encoding="utf-8")
+        out_tar = self.root / f"MicDrop-{platform}-host.tar.gz"
+        package_unix_host.package_host_tarball(stage_dir, out_tar, platform=platform)
+        return out_tar.read_bytes()
+
+    def make_macos_app_zip(self, *, revision=SHA[:12], identity=IDENTITY):
+        src_dir = self.root / "macos-src"
+        src_dir.mkdir(exist_ok=True)
+        exe = src_dir / "MicDrop"
+        dylib = src_dir / "libmicdrop_rtc.dylib"
+        notice = src_dir / "WEBRTC-NOTICE.txt"
+        versions = src_dir / "WEBRTC-VERSIONS.txt"
+        exe.write_bytes(test_macos_app_bundle.make_macho(macos_app_bundle.MH_EXECUTE))
+        dylib.write_bytes(test_macos_app_bundle.make_macho(macos_app_bundle.MH_DYLIB))
+        notice.write_text("WebRTC notice\n", encoding="utf-8")
+        versions.write_text("webrtc=m137\n", encoding="utf-8")
+        app_out = self.root / "macos-build" / "MicDrop.app"
+        zip_out = self.root / "macos-dist" / "MicDrop-macos-arm64-app.zip"
+        macos_app_bundle.build_app_bundle(
+            exe, dylib, notice, versions, app_out,
+            revision=revision, shared_identity=identity,
+        )
+        macos_app_bundle.zip_app_bundle(
+            app_out, zip_out,
+            revision=revision, shared_identity=identity,
+        )
+        return zip_out.read_bytes()
+
+    def test_linux_host_tarball_and_version_are_inspected(self):
+        self.retain("linux-x64-host", {"MicDrop-linux-x64-host.tar.gz": self.make_unix_tarball("linux-x64")})
+
+        def linux_command(args):
+            exe_path = Path(args[0])
+            self.assertTrue(exe_path.is_file())
+            self.assertTrue((exe_path.parent / "libmicdrop_rtc.so").is_file())
+            return json.dumps({**IDENTITY, "revision": SHA, "modified": False, "platform": "linux/amd64"})
+
+        paths = release.stage("linux", self.artifacts, self.root / "linux-good", 42, 1, SHA, IDENTITY, linux_command)
+        self.assertEqual([p.name for p in paths], [
+            "MicDrop-0.1.0-beta.1-linux-x64-host.tar.gz",
+            "MicDrop-0.1.0-beta.1-linux-build.json",
+        ])
+        metadata = json.loads(paths[-1].read_text())
+        self.assertEqual(metadata["signing"], "unsigned Linux x64 CLI and GTK3 desktop bundle")
+        with self.assertRaisesRegex(ValueError, "Embedded Linux build identity mismatch"):
+            release.stage("linux", self.artifacts, self.root / "linux-bad-rev", 42, 1, SHA, IDENTITY,
+                          lambda args: json.dumps({**IDENTITY, "revision": "b" * 40, "modified": False, "platform": "linux/amd64"}))
+
+    def test_macos_app_and_cli_host_are_inspected(self):
+        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip()})
+        self.retain("macos-arm64-host", {"MicDrop-macos-arm64-host.tar.gz": self.make_unix_tarball("macos-arm64")})
+        codesign_targets = []
+
+        def macos_command(args):
+            if args[0] == "codesign":
+                codesign_targets.append([Path(a).name for a in args[1:] if not str(a).startswith("-")])
+                for target in args[1:]:
+                    if not str(target).startswith("-"):
+                        self.assertTrue(Path(target).exists(), target)
+                return ""
+            exe_path = Path(args[0])
+            self.assertTrue(exe_path.is_file())
+            return json.dumps({**IDENTITY, "revision": SHA, "modified": False, "platform": "darwin/arm64"})
+
+        paths = release.stage("macos", self.artifacts, self.root / "macos-good", 42, 1, SHA, IDENTITY, macos_command)
+        self.assertEqual([p.name for p in paths], [
+            "MicDrop-0.1.0-beta.1-macos-arm64-app.zip",
+            "MicDrop-0.1.0-beta.1-macos-arm64-host.tar.gz",
+            "MicDrop-0.1.0-beta.1-macos-build.json",
+        ])
+        self.assertEqual(codesign_targets, [["MicDrop.app"], ["libmicdrop_rtc.dylib", "micdrop-host"]])
+        metadata = json.loads(paths[-1].read_text())
+        self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop.mac")
+        self.assertEqual(metadata["minimum_os"], "14.2")
+        with self.assertRaisesRegex(ValueError, "Embedded macOS build identity mismatch"):
+            release.stage(
+                "macos", self.artifacts, self.root / "macos-bad-embed", 42, 1, SHA, IDENTITY,
+                lambda args: "" if args[0] == "codesign" else json.dumps(
+                    {**IDENTITY, "revision": SHA, "modified": True, "platform": "darwin/arm64"}),
+            )
+        # Also verify Info.plist revision mismatch is rejected before command execution.
+        for folder in (self.artifacts / "macos-arm64-app", self.workspace / "macos-arm64-app"):
+            for child in sorted(folder.rglob("*"), reverse=True):
+                child.unlink() if child.is_file() else child.rmdir()
+            folder.rmdir()
+        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip(revision="b" * 12)})
+        with self.assertRaisesRegex(ValueError, "MicDropRevision"):
+            release.stage("macos", self.artifacts, self.root / "macos-bad-plist", 42, 1, SHA, IDENTITY, macos_command)
+
     def test_complete_draft_gets_verified_checksums_but_remains_unpublished(self):
         api = FakeGitHub()
         release.prepare(api, RUN, IDENTITY, NOTES)
-        for suffix in ["-windows-x64-setup.exe", "-windows-x64-portable.zip", "-android-arm64-dev.apk", "-windows-build.json", "-android-build.json"]:
+        for suffix in REQUIRED_SUFFIXES:
+            if suffix.startswith("-linux"):
+                continue
+            path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
+            path.write_bytes(suffix.encode())
+            release.upload(api, 7, RUN, IDENTITY, path)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected assets"):
+            release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "missing-linux")
+        for suffix in REQUIRED_SUFFIXES:
+            if not suffix.startswith("-linux"):
+                continue
             path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
             path.write_bytes(suffix.encode())
             release.upload(api, 7, RUN, IDENTITY, path)
@@ -348,8 +482,8 @@ class DraftReleaseTests(unittest.TestCase):
         self.assertTrue(api.release["draft"])
         self.assertEqual(api.release["tag_name"], "v" + IDENTITY["version"])
         self.assertNotIn("INCOMPLETE", api.release["body"])
-        self.assertEqual(len(api.assets), 7)
-        self.assertEqual(len((self.root / "done/SHA256SUMS").read_text().splitlines()), 6)
+        self.assertEqual(len(api.assets), len(REQUIRED_SUFFIXES) + 2)
+        self.assertEqual(len((self.root / "done/SHA256SUMS").read_text().splitlines()), len(REQUIRED_SUFFIXES) + 1)
         assets = copy.deepcopy(api.assets)
         self.assertEqual(release.prepare(api, RUN, IDENTITY, NOTES)["id"], 7)
         release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "repeat")
@@ -364,8 +498,7 @@ class DraftReleaseTests(unittest.TestCase):
         release.prepare(api, RUN, IDENTITY, NOTES)
         api.assets = [{"name": "MicDrop-" + IDENTITY["version"] + suffix,
                        "state": "uploaded", "digest": "sha256:" + "b" * 64, "size": 1}
-                      for suffix in ["-windows-x64-setup.exe", "-windows-x64-portable.zip",
-                                     "-android-arm64-dev.apk", "-windows-build.json", "-android-build.json"]]
+                      for suffix in REQUIRED_SUFFIXES]
         request = api.request
 
         def reset_tag(method, path, data=None, file=None):
@@ -381,8 +514,7 @@ class DraftReleaseTests(unittest.TestCase):
     def test_optional_ios_assets_are_included_only_when_complete(self):
         api = FakeGitHub()
         release.prepare(api, RUN, IDENTITY, NOTES)
-        for suffix in ["-windows-x64-setup.exe", "-windows-x64-portable.zip", "-android-arm64-dev.apk",
-                       "-windows-build.json", "-android-build.json", "-ios-arm64-unsigned.ipa"]:
+        for suffix in [*REQUIRED_SUFFIXES, "-ios-arm64-unsigned.ipa"]:
             path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
             path.write_bytes(suffix.encode())
             release.upload(api, 7, RUN, IDENTITY, path)
@@ -392,8 +524,8 @@ class DraftReleaseTests(unittest.TestCase):
         ios_meta.write_bytes(b"{}")
         release.upload(api, 7, RUN, IDENTITY, ios_meta)
         release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "with-ios")
-        self.assertEqual(len(api.assets), 9)
-        self.assertEqual(len((self.root / "with-ios/SHA256SUMS").read_text().splitlines()), 8)
+        self.assertEqual(len(api.assets), len(REQUIRED_SUFFIXES) + 4)
+        self.assertEqual(len((self.root / "with-ios/SHA256SUMS").read_text().splitlines()), len(REQUIRED_SUFFIXES) + 3)
         manifest = json.loads((self.root / "with-ios/release-manifest.json").read_text())
         self.assertIn("MicDrop-0.1.0-beta.1-ios-arm64-unsigned.ipa", [a["name"] for a in manifest["assets"]])
         self.assertIn("MicDrop-0.1.0-beta.1-ios-build.json", [a["name"] for a in manifest["assets"]])
