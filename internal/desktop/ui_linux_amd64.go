@@ -1226,3 +1226,11 @@ func setAllowModalsForTest(allow bool) {
 	}
 	C.md_test_set_allow_modals(flag)
 }
+
+func dismissModalsForTest() {
+	C.md_ui_dismiss_modals()
+}
+
+func liveModalObjectsForTest() int {
+	return int(C.md_test_live_modal_objects())
+}

@@ -25,6 +25,7 @@ typedef unsigned long GType;
 typedef void* gpointer;
 typedef void (*GCallback)(void);
 typedef void (*GClosureNotify)(gpointer data, void* closure);
+typedef void (*GWeakNotify)(gpointer data, gpointer where_the_object_was);
 typedef gboolean (*GSourceFunc)(gpointer user_data);
 typedef void (*GDBusSignalCallback)(void* connection, const char* sender_name,
                                     const char* object_path, const char* interface_name,
@@ -143,6 +144,7 @@ typedef struct {
   void (*g_object_set)(gpointer object, const char* first_property_name, ...);
   void (*g_object_get)(gpointer object, const char* first_property_name, ...);
   void (*g_object_unref)(gpointer object);
+  void (*g_object_weak_ref)(gpointer object, GWeakNotify notify, gpointer data);
 
   // GIO
   gboolean (*g_app_info_launch_default_for_uri)(const char* uri, void* context, GError** error);
@@ -416,6 +418,7 @@ static int mdLoadGtkSymbols(char* err_buf, size_t err_cap) {
   LOAD_SYM(gobject, g_object_set);
   LOAD_SYM(gobject, g_object_get);
   LOAD_SYM(gobject, g_object_unref);
+  LOAD_SYM(gobject, g_object_weak_ref);
 
   LOAD_SYM(gio, g_app_info_launch_default_for_uri);
   LOAD_SYM(gio, g_bus_get_sync);
@@ -2164,6 +2167,21 @@ int md_ui_has_active_modal(void) {
   return (gApp.active_dialog != NULL || gApp.active_native_dialog != NULL) ? 1 : 0;
 }
 
+static int gLiveModalObjects = 0;
+
+static void mdOnModalObjectFinalized(gpointer data, gpointer where_the_object_was) {
+  (void)data;
+  (void)where_the_object_was;
+  __atomic_sub_fetch(&gLiveModalObjects, 1, __ATOMIC_SEQ_CST);
+}
+
+static void mdTrackModalObject(void* obj) {
+  if (obj != NULL && gGtk.g_object_weak_ref != NULL) {
+    __atomic_add_fetch(&gLiveModalObjects, 1, __ATOMIC_SEQ_CST);
+    gGtk.g_object_weak_ref(obj, mdOnModalObjectFinalized, NULL);
+  }
+}
+
 static int mdCanRunModal(void) {
   return !(gApp.headless_test && !gApp.allow_modals_in_test) &&
          gGtk.loaded && gApp.gtk_inited &&
@@ -2179,6 +2197,7 @@ void md_ui_show_error(const char* message) {
   if (dlg == NULL) {
     return;
   }
+  mdTrackModalObject(dlg);
   gGtk.gtk_message_dialog_format_secondary_text(dlg, "%s", message != NULL ? message : "");
   void* prev = gApp.active_dialog;
   gApp.active_dialog = dlg;
@@ -2198,6 +2217,7 @@ void md_ui_show_info(const char* title, const char* message) {
   if (dlg == NULL) {
     return;
   }
+  mdTrackModalObject(dlg);
   gGtk.gtk_message_dialog_format_secondary_text(dlg, "%s", message != NULL ? message : "");
   void* prev = gApp.active_dialog;
   gApp.active_dialog = dlg;
@@ -2216,6 +2236,7 @@ int md_ui_confirm(const char* message) {
   if (dlg == NULL) {
     return 0;
   }
+  mdTrackModalObject(dlg);
   gGtk.gtk_message_dialog_format_secondary_text(dlg, "%s", message != NULL ? message : "");
   gGtk.gtk_dialog_add_button(dlg, "Cancel", MD_GTK_RESPONSE_CANCEL);
   gGtk.gtk_dialog_add_button(dlg, "Confirm", MD_GTK_RESPONSE_ACCEPT);
@@ -2242,8 +2263,10 @@ char* md_ui_choose_json_file(void) {
   if (chooser == NULL) {
     return NULL;
   }
+  mdTrackModalObject(chooser);
   void* filter = gGtk.gtk_file_filter_new();
   if (filter != NULL) {
+    mdTrackModalObject(filter);
     gGtk.gtk_file_filter_set_name(filter, "JSON configuration (*.json)");
     gGtk.gtk_file_filter_add_pattern(filter, "*.json");
     gGtk.gtk_file_filter_add_mime_type(filter, "application/json");
@@ -2264,6 +2287,7 @@ char* md_ui_choose_json_file(void) {
     }
   }
   gGtk.gtk_native_dialog_destroy(chooser);
+  gGtk.g_object_unref(chooser);
   return out;
 }
 
@@ -2403,6 +2427,13 @@ void md_test_set_allow_modals(int allow) {
   if (__atomic_load_n(&gApp.initialized, __ATOMIC_ACQUIRE)) {
     gApp.allow_modals_in_test = gTestAllowModals;
   }
+}
+
+int md_test_live_modal_objects(void) {
+  if (mdIsActiveMainThread()) {
+    mdFlushEvents();
+  }
+  return __atomic_load_n(&gLiveModalObjects, __ATOMIC_SEQ_CST);
 }
 
 #endif

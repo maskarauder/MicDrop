@@ -1442,3 +1442,148 @@ func TestLinuxDesktopTrayHostAvailabilityFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestLinuxDesktopDialogRepeatedOpenCloseFinalizesObjects(t *testing.T) {
+	if !hasLinuxDisplay() {
+		t.Skip("Linux GUI test requires DISPLAY or WAYLAND_DISPLAY")
+	}
+	t.Setenv("GSETTINGS_BACKEND", "memory")
+	setAllowModalsForTest(true)
+	defer setAllowModalsForTest(false)
+
+	uiDo := func(fn func()) {
+		done := make(chan struct{})
+		uiTestQueue <- func() {
+			fn()
+			close(done)
+		}
+		wakeTestQueue()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out dispatching onto GTK main thread")
+		}
+	}
+
+	devicesReady := make(chan struct{}, 1)
+	finished := make(chan error, 1)
+	backend := Backend{
+		Devices: func() ([]AudioDevice, error) {
+			select {
+			case devicesReady <- struct{}{}:
+			default:
+			}
+			return []AudioDevice{{ID: "speaker", Name: "PipeWire Output (test)", Default: true}}, nil
+		},
+		RemoteStatus: func() (string, error) { return "No remote configuration imported", nil },
+	}
+
+	dir := t.TempDir()
+	settings := Defaults()
+	settings.Notifications = false
+	if err := SaveSettings(dir, settings); err != nil {
+		t.Fatal(err)
+	}
+
+	linuxMainThread <- func() {
+		finished <- runWindow(backend, dir, false, true)
+	}
+	defer func() {
+		uiDo(func() { triggerControlForTest(idExit, 0) })
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Errorf("runWindow returned error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("runWindow did not finish cleanup")
+		}
+	}()
+
+	select {
+	case <-devicesReady:
+	case err := <-finished:
+		t.Fatalf("runWindow exited early: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runWindow did not reach initial device refresh")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var ready bool
+		uiDo(func() { ready = activeWindow != nil && !activeWindow.busy })
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("window did not finish initial refresh")
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	var baseline int
+	uiDo(func() { baseline = liveModalObjectsForTest() })
+	if baseline != 0 {
+		t.Fatalf("expected 0 live modal GObjects before test, got %d", baseline)
+	}
+
+	runDialogCycle := func(label string, minExpectedWhileOpen int, openFn func()) {
+		closed := make(chan struct{})
+		uiTestQueue <- func() {
+			openFn()
+			close(closed)
+		}
+		wakeTestQueue()
+
+		waitDeadline := time.Now().Add(5 * time.Second)
+		var liveWhileOpen int
+		for {
+			var active bool
+			uiDo(func() {
+				active = hasActiveModalForTest()
+				liveWhileOpen = liveModalObjectsForTest()
+			})
+			if active {
+				break
+			}
+			if time.Now().After(waitDeadline) {
+				t.Fatalf("%s modal did not become active", label)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if liveWhileOpen < minExpectedWhileOpen {
+			t.Fatalf("%s: expected at least %d tracked live GObject(s) while open, got %d",
+				label, minExpectedWhileOpen, liveWhileOpen)
+		}
+
+		uiDo(func() { dismissModalsForTest() })
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s modal did not close after dismiss", label)
+		}
+
+		var retained int
+		uiDo(func() { retained = liveModalObjectsForTest() })
+		if retained != 0 {
+			t.Fatalf("%s leaked %d modal GObject(s) after close", label, retained)
+		}
+	}
+
+	// Regression check: 25 repeated Import dialog (GtkFileChooserNative + GtkFileFilter) cycles
+	// must finalize both objects on every close and retain 0 GObjects.
+	for i := 0; i < 25; i++ {
+		runDialogCycle("ImportDialog", 2, func() { triggerControlForTest(idImport, 0) })
+	}
+
+	// Also verify repeated GtkMessageDialog cycles (help, confirm, error) finalize cleanly.
+	for i := 0; i < 5; i++ {
+		runDialogCycle("HelpDialog", 1, func() { triggerControlForTest(idCableHelp, 0) })
+		runDialogCycle("ConfirmDialog", 1, func() { triggerControlForTest(idForget, 0) })
+		runDialogCycle("ErrorDialog", 1, func() {
+			if activeWindow != nil {
+				activeWindow.showErr(errors.New("simulated failure"))
+			}
+		})
+	}
+}
