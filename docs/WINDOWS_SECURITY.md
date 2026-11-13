@@ -48,11 +48,23 @@ does not identify which installer action caused a detection.
 
 - Keep the installer per-user with clear consent and stable publisher/product
   metadata. Ship only the allowlisted runtime, notices and current guides.
-- Use consistent Authenticode signing with a trusted signing identity for the
-  project's Windows executables, DLL and final installer when signing is ready.
-  Timestamp signatures, verify them, and generate manifests/checksums from the
-  final signed bytes. Integrate signed-uninstaller support with the installer
-  tooling as part of that work. Current development builds remain unsigned.
+- Sign the project's Windows executables, DLL, uninstaller and final installer
+  consistently via Microsoft Azure Artifact Signing (`tools/windows_signing.py`)
+  on `main` and `workflow_dispatch` builds:
+  1. Sign `MicDrop.exe` and `micdrop_rtc.dll` in `build/host` before packaging so
+     portable and installer copies share identical signed bytes.
+  2. Sign `MicDrop-maintenance.exe` inside `tools/build_windows_installer.ps1`
+     immediately after compilation and before `payload-manifest.json` SHA-256
+     digests are recorded.
+  3. Enable Inno Setup `SignedUninstaller=yes` and `SignTool=micdrop` so both
+     `unins000.exe` and `MicDrop-<version>-<sha>-windows-x64-setup.exe` are
+     signed and RFC 3161 timestamped (`http://timestamp.acs.microsoft.com`), while
+     keeping isolated CI installer tests (`tools/test_windows_installer.ps1`)
+     unsigned so test runs consume zero cloud-signing quota.
+  4. Verify all Authenticode chains and timestamps (`signtool.exe verify /pa /tw`)
+     before Microsoft Defender scanning and record signer provenance in
+     `tools/draft_release.py`. Pull-request and fork builds receive no `AZURE_*`
+     secrets and fall back cleanly to unsigned development packages.
 - Retain the exact tested installer for distribution. Do not rebuild or modify
   it after approval and keep the portable/runtime bytes tied to that candidate.
 - Test fresh install, upgrade with the app running, launch, repair and uninstall
@@ -64,14 +76,37 @@ does not identify which installer action caused a detection.
   ownership checks or disguise binaries to influence detection.
 
 Microsoft does not provide a blanket false-positive prevention program.
-Consistent signing can help identify a publisher; it does not guarantee absence
-of Antivirus or SmartScreen warnings. Self-signing does not establish a publicly
+Consistent signing identifies a verified publisher and satisfies Smart App
+Control's trusted-signature check, though newly issued certificates still build
+SmartScreen download reputation gradually and do not guarantee absence of
+Antivirus or SmartScreen warnings. Self-signing does not establish a publicly
 trusted publisher.
+
+## CI Azure Artifact Signing configuration
+
+`build.yml` reads repository secrets only on non-`pull_request` runs (`push` to
+`main` and `workflow_dispatch`) and wipes ephemeral tokens/secrets under
+`if: always()`:
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `AZURE_TENANT_ID` | Yes | Microsoft Entra directory (tenant) UUID |
+| `AZURE_CLIENT_ID` | Yes | Microsoft Entra app registration (client) UUID with **Artifact Signing Certificate Profile Signer** role |
+| `AZURE_SIGNING_ENDPOINT` | Yes | Regional HTTPS Artifact Signing URI ending in `.codesigning.azure.net` (for example `https://eus.codesigning.azure.net`) |
+| `AZURE_SIGNING_ACCOUNT` | Yes | Azure Artifact Signing account resource name |
+| `AZURE_SIGNING_CERT_PROFILE` | Yes | Public Trust certificate profile name |
+| `AZURE_CLIENT_SECRET` | Only without OIDC | Optional Entra client secret; omit when using a GitHub Actions OIDC federated credential (`repo:maskarauder/MicDrop:ref:refs/heads/main`) |
+| `AZURE_SIGNING_PUBLISHER` | Optional | Display publisher name for Inno Setup `AppPublisher` / `VersionInfoCompany` (defaults to `Noah Seymour`) |
+
+`tools/windows_signing.py` pins and SHA-256-verifies Microsoft's official
+`Microsoft.Windows.SDK.BuildTools` (`10.0.28000.2957`) and
+`Microsoft.ArtifactSigning.Client` (`1.0.146`) NuGet packages in `.deps/`.
 
 ## What CI establishes
 
 `tools/scan_windows.ps1` records hashes and Defender versions, validates its
-scanner with an EICAR archive, and scans the package using local intelligence.
+scanner with an EICAR archive, and scans the final (signed on `main`) package
+using local intelligence.
 The CI scan job intentionally disables cloud reporting and sample submission.
 This check is useful evidence, not clearance for every download or installation
 environment. The EICAR result belongs to the scanner positive control; target

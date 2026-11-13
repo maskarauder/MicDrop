@@ -7,6 +7,8 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$')][string] $AppVersion,
     [ValidatePattern('^[a-fA-F0-9]{12,40}$')][string] $BuildRevision,
     [string] $CompilerPath,
+    [switch] $SignInstaller,
+    [string] $PublisherName = $env:MICDROP_WINDOWS_PUBLISHER,
     # These compile-time overrides create a different product for isolated CI.
     [string] $InstallerTestRoot,
     [ValidatePattern('^[a-fA-F0-9-]{36}$')][string] $InstallerTestId
@@ -34,6 +36,22 @@ if ([bool]$InstallerTestRoot -ne [bool]$InstallerTestId) {
 }
 if ($InstallerTestRoot -and -not [IO.Path]::IsPathFullyQualified($InstallerTestRoot)) {
     throw 'The isolated installer test root must be an absolute path.'
+}
+if ($SignInstaller -and $InstallerTestRoot) {
+    throw '-SignInstaller cannot be combined with -InstallerTestRoot.'
+}
+$pythonExe = $null
+$signingScript = $null
+if ($SignInstaller) {
+    if (-not $PublisherName -or -not $PublisherName.Trim()) {
+        $PublisherName = 'Noah Seymour'
+    }
+    $PublisherName = $PublisherName.Trim()
+    if ($PublisherName.Length -gt 120 -or $PublisherName -match '[\x00-\x1f";#]') {
+        throw 'Invalid -PublisherName for Inno Setup.'
+    }
+    $pythonExe = (Get-Command python -ErrorAction Stop).Source
+    $signingScript = Join-Path $repoRoot 'tools/windows_signing.py'
 }
 if (-not $BuildRevision) {
     $BuildRevision = (& git -C $repoRoot rev-parse HEAD | Out-String).Trim()
@@ -104,12 +122,20 @@ function Copy-PayloadFile([string] $Source, [string] $RelativePath) {
     Copy-Item -LiteralPath $Source -Destination $destination
 }
 $stageRoot = Join-Path ([IO.Path]::GetTempPath()) ('micdrop-installer-payload-' + [guid]::NewGuid().ToString('N'))
+$uninstSignDir = $null
+if ($SignInstaller) {
+    $uninstSignDir = Join-Path ([IO.Path]::GetTempPath()) ('micdrop-signed-uninst-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $uninstSignDir | Out-Null
+}
 New-Item -ItemType Directory -Path $stageRoot | Out-Null
 try {
     foreach ($name in $requiredFiles) { Copy-PayloadFile (Join-Path $payloadRoot $name) $name }
     # Pure Go: this helper can stop old hosts even when their media DLL is missing.
     $helper = Join-Path $stageRoot 'MicDrop-maintenance.exe'
     Invoke-InstallerTool 'go' @('-C', $repoRoot, 'build', '-buildvcs=false', '-trimpath', '-o', $helper, './tools/windows-maintenance')
+    if ($SignInstaller) {
+        Invoke-InstallerTool $pythonExe @($signingScript, 'sign', $helper) 240
+    }
     Copy-PayloadFile (Join-Path $repoRoot 'third_party/INNOSETUP-NOTICE.txt') 'INNOSETUP-NOTICE.txt'
     $files = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
         [ordered]@{
@@ -129,10 +155,21 @@ try {
     New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
     $arguments = @('/Qp', "/DPayloadDir=$stageRoot", "/DOutputDir=$outputRoot", "/DAppVersion=$AppVersion", "/DBuildRevision=$BuildRevision")
     if ($InstallerTestRoot) { $arguments += @('/DInstallerTest', "/DTestRoot=$InstallerTestRoot", "/DTestId=$InstallerTestId") }
+    if ($SignInstaller) {
+        $arguments += @(
+            '/DSignInstaller',
+            "/DPublisherName=$PublisherName",
+            "/DSignedUninstallerDir=$uninstSignDir",
+            "/Smicdrop=`$q$pythonExe`$q `$q$signingScript`$q sign `$f"
+        )
+    }
     $arguments += Join-Path $repoRoot 'deploy/windows/MicDrop.iss'
-    Invoke-InstallerTool $CompilerPath $arguments 300
+    Invoke-InstallerTool $CompilerPath $arguments $(if ($SignInstaller) { 480 } else { 300 })
     Copy-Item -LiteralPath (Join-Path $stageRoot 'payload-manifest.json') -Destination $outputRoot -Force
     Write-Host "Installer and payload manifest: $outputRoot"
 } finally {
-    Remove-Item -LiteralPath $stageRoot -Recurse -Force
+    Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($uninstSignDir -and (Test-Path -LiteralPath $uninstSignDir)) {
+        Remove-Item -LiteralPath $uninstSignDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

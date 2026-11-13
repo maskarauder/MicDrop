@@ -23,6 +23,9 @@ concurrency:
 jobs:
   host:
     name: Host and native contracts (${{ matrix.os }})
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +142,7 @@ jobs:
       - name: Validate native dependency selection and checksums
         if: runner.os == 'Linux'
         run: python -m unittest discover -s tools -p 'test_fetch_webrtc.py' -v
-      - name: Validate iPhone, macOS, and Unix host packaging checks
+      - name: Validate Apple, Windows, and Unix host packaging checks
         if: runner.os == 'Linux'
         run: |
           python -m unittest discover -s tools -p 'test_ios_bundle.py' -v
@@ -149,6 +152,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_package_unix_host.py' -v
           python -m unittest discover -s tools -p 'test_generate_apple_icons.py' -v
           python -m unittest discover -s tools -p 'test_apple_signing.py' -v
+          python -m unittest discover -s tools -p 'test_windows_signing.py' -v
           python tools/generate_apple_icons.py check
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
       - name: Validate Android page-size rejection checks
@@ -589,15 +593,42 @@ jobs:
       - name: Prepare Windows release payload and notices
         if: runner.os == 'Windows'
         run: python tools/windows_payload.py
+      - name: Prepare Windows Authenticode signing
+        if: runner.os == 'Windows'
+        id: windows_signing
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ github.event_name != 'pull_request' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_SIGNING_ENDPOINT: ${{ github.event_name != 'pull_request' && secrets.AZURE_SIGNING_ENDPOINT || '' }}
+          AZURE_SIGNING_ACCOUNT: ${{ github.event_name != 'pull_request' && secrets.AZURE_SIGNING_ACCOUNT || '' }}
+          AZURE_SIGNING_CERT_PROFILE: ${{ github.event_name != 'pull_request' && secrets.AZURE_SIGNING_CERT_PROFILE || '' }}
+          AZURE_SIGNING_PUBLISHER: ${{ github.event_name != 'pull_request' && secrets.AZURE_SIGNING_PUBLISHER || '' }}
+        run: python tools/windows_signing.py prepare
+      - name: Sign Windows runtime payload
+        if: runner.os == 'Windows' && steps.windows_signing.outputs.signed == 'true'
+        shell: pwsh
+        run: python tools/windows_signing.py sign build/host/MicDrop.exe build/host/micdrop_rtc.dll
       - name: Build per-user Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tools/build_windows_installer.ps1 -PayloadDirectory build/host -OutputDirectory build/windows-installer
+        env:
+          WINDOWS_SIGNED: ${{ steps.windows_signing.outputs.signed }}
+        run: ./tools/build_windows_installer.ps1 -PayloadDirectory build/host -OutputDirectory build/windows-installer -SignInstaller:($env:WINDOWS_SIGNED -eq 'true')
       - name: Check isolated Windows install, upgrade and uninstall
         if: runner.os == 'Windows'
         timeout-minutes: 8
         shell: pwsh
         run: ./tools/test_windows_installer.ps1 -PayloadDirectory build/host -CompilerPath .deps/inno-setup-7.1.0/ISCC.exe -ReportDirectory build/windows-installer-tests
+      - name: Verify Windows Authenticode signatures
+        if: runner.os == 'Windows' && steps.windows_signing.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $setups = @(Get-ChildItem -LiteralPath build/windows-installer -Filter 'MicDrop-*-windows-x64-setup.exe' -File)
+          if ($setups.Count -ne 1) { throw "Expected exactly one Windows setup executable; found $($setups.Count)." }
+          python tools/windows_signing.py verify --require-signed build/host/MicDrop.exe build/host/micdrop_rtc.dll $setups[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Scan Windows package with Microsoft Defender
         if: runner.os == 'Windows'
         timeout-minutes: 10
@@ -655,6 +686,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: python tools/draft_release.py stage --platform windows --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
+      - name: Remove runner Windows signing material
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: python tools/windows_signing.py cleanup
       - name: Remove runner Apple signing material
         if: always() && runner.os == 'macOS'
         shell: bash

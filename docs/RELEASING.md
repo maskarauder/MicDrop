@@ -36,9 +36,15 @@ reports.
 These drafts retain `com.maskarauder.micdrop.dev` on Android with the existing
 stable Android development signing secret so existing development APK
 installations update in place without losing pairings or settings (it remains a
-debuggable development APK rather than a Play Store release). Windows and Linux
-packages remain unsigned. On `main` and `workflow_dispatch` runs with Apple
-signing secrets configured, macOS arm64 packages (`com.maskarauder.micdrop.mac`)
+debuggable development APK rather than a Play Store release). Linux x64 packages
+remain unsigned. On `main` and `workflow_dispatch` runs with Azure Artifact
+Signing secrets configured, Windows x64 packages (`MicDrop.exe`,
+`micdrop_rtc.dll`, `MicDrop-maintenance.exe`, `unins000.exe`, and
+`MicDrop-<version>-windows-x64-setup.exe`) are Authenticode-signed and RFC 3161
+timestamped via `tools/windows_signing.py` (see [WINDOWS_SECURITY.md](WINDOWS_SECURITY.md)),
+while pull-request builds fall back to unsigned packages without exposing
+secrets. Likewise, when Apple signing secrets are configured, macOS arm64
+packages (`com.maskarauder.micdrop.mac`)
 are signed with `Developer ID Application` + Hardened Runtime and notarized with
 Apple (`MicDrop.app` includes a stapled notarization ticket), while pull-request
 builds fall back to ad-hoc signing without exposing secrets. On iPhone, the app
@@ -88,9 +94,9 @@ scoped to the draft workflow, while normal CI builds retain read-only permission
 
 | Asset | Purpose |
 | --- | --- |
-| `MicDrop-<version>-windows-x64-setup.exe` | Complete per-user Windows installer |
-| `MicDrop-<version>-windows-x64-portable.zip` | Windows desktop app/DLL, required notices, README and beta guide |
-| `MicDrop-<version>-windows-build.json` | Windows source/build identity and package hashes |
+| `MicDrop-<version>-windows-x64-setup.exe` | Authenticode-signed per-user Windows installer (with signed uninstaller and maintenance helper) |
+| `MicDrop-<version>-windows-x64-portable.zip` | Authenticode-signed `MicDrop.exe` and `micdrop_rtc.dll`, required notices, README and beta guide |
+| `MicDrop-<version>-windows-build.json` | Windows source/build identity, Authenticode signer metadata, and package hashes |
 | `MicDrop-<version>-linux-x64-host.tar.gz` | Linux x64 CLI + GTK3 desktop host, WebRTC `.so`, and notices |
 | `MicDrop-<version>-linux-build.json` | Linux source/build identity and archive hash |
 | `MicDrop-<version>-macos-arm64-app.zip` | Developer ID signed, Apple-notarized macOS 14.2+ arm64 `MicDrop.app` desktop bundle |
@@ -198,8 +204,10 @@ assembling a draft does not validate audio, handoffs, or new hardware.
 ## Volunteer beta
 
 A Windows/Linux/macOS/Android/iPhone beta can use these packages. Tell testers
-that Windows and Linux are unsigned, macOS is Developer ID signed and
-Apple-notarized, Android is a debuggable development APK, and iPhone can be
+that Windows is Authenticode-signed (though newly issued certificates may still
+show a SmartScreen reputation prompt until download reputation builds), macOS is
+Developer ID signed and Apple-notarized, Linux is unsigned, Android is a
+debuggable development APK, and iPhone can be
 installed via TestFlight or sideloaded from the unsigned IPA with their own
 Apple ID. Preserve the stable Android signer (`MICDROP_DEBUG_KEYSTORE_BASE64`);
 replacing it prevents in-place updates.

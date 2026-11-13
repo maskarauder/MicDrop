@@ -31,12 +31,13 @@ shared C++ tone diagnostics remain available across Windows, Linux, and macOS.
 | Android compile / target SDK | 36 |
 | Android Build Tools | 35.0.0 |
 | Android NDK | 27.0.12077973, for packaging prebuilt native libraries |
-| iPhone | iOS 17.0+, arm64 iPhone; unsigned development IPA, sideloaded |
+| iPhone | iOS 17.0+, arm64 iPhone (`com.maskarauder.micdrop`); TestFlight distribution IPA (`Apple Distribution`) and unsigned sideload IPA |
 | Xcode | 26.6 (17F113) on GitHub-hosted `macos-26`; iOS SDK 26.5 |
 | Swift | 6.3 toolchain (Xcode 26.6; Linux `swift:6.3.3-noble` by digest); Swift 5 language mode |
 | XcodeGen | 2.46.0 release zip, SHA-256 `4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806` |
 | SwiftPM packages | Exact versions in `apps/ios/MicDropKit/Package.swift`; pins in its `Package.resolved`; see [iPhone provenance](../third_party/IOS.md) |
 | WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Linux, macOS, Android, and iPhone; checksummed assets in the lock file |
+| Windows Authenticode signing | Microsoft `SignTool` (`Microsoft.Windows.SDK.BuildTools` `10.0.28000.2957`) + `Azure.CodeSigning.Dlib` (`Microsoft.ArtifactSigning.Client` `1.0.146`), pinned by SHA-256 in `tools/windows_signing.py` |
 | Dependency fetcher | Python 3.11+ |
 
 These are selected compatible versions, not a claim that they are the newest.

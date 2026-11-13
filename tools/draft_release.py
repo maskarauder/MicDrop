@@ -108,6 +108,66 @@ def _extract_verified_app_zip(zip_path, destination):
                     os.chmod(target, perms if perms else 0o644)
 
 
+def _inspect_windows_authenticode(targets, command):
+    quoted = ", ".join("'" + str(Path(p)).replace("'", "''") + "'" for p in targets)
+    ps_script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$paths = @({quoted}); "
+        "$out = foreach ($p in $paths) { "
+        "$sig = Get-AuthenticodeSignature -LiteralPath $p; "
+        "$cert = $sig.SignerCertificate; "
+        "$ts = $sig.TimeStamperCertificate; "
+        "[ordered]@{ "
+        "file = [IO.Path]::GetFileName($p); "
+        "status = [string]$sig.Status; "
+        "status_message = [string]$sig.StatusMessage; "
+        "subject = if ($null -ne $cert) { [string]$cert.Subject } else { '' }; "
+        "issuer = if ($null -ne $cert) { [string]$cert.Issuer } else { '' }; "
+        "sha256 = if ($null -ne $cert) { $cert.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant() } else { '' }; "
+        "timestamped = ($null -ne $ts) "
+        "} }; "
+        "ConvertTo-Json -InputObject @($out) -Compress"
+    )
+    raw = command(["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps_script])
+    records = json.loads(raw)
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list) or len(records) != len(targets):
+        raise ValueError("Unexpected Authenticode inspection output for Windows packages")
+    statuses = [rec.get("status") for rec in records]
+    if all(status == "NotSigned" for status in statuses):
+        return {"signing": "unsigned Windows development packages"}
+    if any(status == "NotSigned" for status in statuses):
+        raise ValueError("Inconsistent Windows Authenticode signing state across setup and runtime binaries")
+    subjects = set()
+    issuers = set()
+    for rec in records:
+        if rec.get("status") != "Valid":
+            raise ValueError(
+                f"Invalid Windows Authenticode signature on {rec.get('file')}: "
+                f"{rec.get('status')} ({rec.get('status_message')})"
+            )
+        if rec.get("timestamped") is not True:
+            raise ValueError(
+                f"Windows Authenticode signature on {rec.get('file')} is missing an RFC 3161 timestamp"
+            )
+        cert_sha = rec.get("sha256", "")
+        subject = rec.get("subject", "").strip()
+        issuer = rec.get("issuer", "").strip()
+        if not re.fullmatch(DIGEST, cert_sha) or not subject:
+            raise ValueError(f"Missing signer certificate metadata on {rec.get('file')}")
+        subjects.add(subject)
+        issuers.add(issuer)
+    if len(subjects) != 1:
+        raise ValueError("Mismatched Windows Authenticode signer subjects across Windows packages")
+    return {
+        "signing": "Authenticode-signed and timestamped Windows x64 installer and portable payload",
+        "signer_subject": next(iter(subjects)),
+        "signer_issuer": next(iter(issuers)),
+        "certificate_sha256": records[-1]["sha256"],
+    }
+
+
 def stage(platform, root, output, run_id, attempt, sha, identity, command=run_command, *, ios_ipa=None):
     if not re.fullmatch(SHA, sha) or not str(run_id).isdecimal() or not str(attempt).isdecimal():
         raise ValueError("Invalid build identity")
@@ -159,7 +219,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
                 with archive.open(item, "w") as target, path.open("rb") as source:
                     shutil.copyfileobj(source, target)
         packages.append(portable)
-        info["signing"] = "unsigned Windows development packages"
+        info.update(_inspect_windows_authenticode([host["MicDrop.exe"], host["micdrop_rtc.dll"], setup], command))
     elif platform == "linux":
         files = retained(root, "linux-x64-host", run_id, attempt, sha)
         tarball = files["MicDrop-linux-x64-host.tar.gz"]
@@ -368,8 +428,9 @@ def marker(run):
 def release_body(run, identity, notes, complete):
     status = "Packages verified; draft awaits human review." if complete else "INCOMPLETE: package uploads/verification are still pending. Do not publish."
     return (marker(run) + "\n\n" + status + "\n\n" + notes.strip() + "\n\n"
-            + "Package signing: macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized; "
-            + "Windows and Linux x64 are unsigned; Android uses the existing development signer (`com.maskarauder.micdrop.dev`); "
+            + "Package signing: Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped; "
+            + "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized; "
+            + "Linux x64 is unsigned; Android uses the existing development signer (`com.maskarauder.micdrop.dev`); "
             + "any included iPhone `.ipa` (`com.maskarauder.micdrop`) is unsigned for Apple ID sideloading (TestFlight builds are distributed via App Store Connect). "
             + "First-party source is MPL-2.0; provide recipients with matching source and notices.\n\n"
             + f"Source: `{run['head_sha']}` · Android version code: `{identity['android_version_code']}`\n\n"

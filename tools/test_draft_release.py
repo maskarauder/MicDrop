@@ -109,6 +109,12 @@ class DraftReleaseTests(unittest.TestCase):
                 "app_version": IDENTITY["version"], "build_revision": SHA, "files": entries})})
 
     def windows_command(self, args):
+        if args[0] == "pwsh":
+            return json.dumps([
+                {"file": "MicDrop.exe", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+                {"file": "micdrop_rtc.dll", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+                {"file": "MicDrop-0.1.0-beta.1-windows-x64-setup.exe", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+            ])
         return json.dumps({**IDENTITY, "revision": SHA, "modified": False, "platform": "windows/amd64"})
 
     def test_portable_and_installer_share_verified_curated_payload(self):
@@ -116,10 +122,49 @@ class DraftReleaseTests(unittest.TestCase):
         first = release.stage("windows", self.artifacts, self.root / "out1", 42, 1, SHA, IDENTITY, self.windows_command)
         second = release.stage("windows", self.artifacts, self.root / "out2", 42, 1, SHA, IDENTITY, self.windows_command)
         self.assertEqual([release.digest(p) for p in first], [release.digest(p) for p in second])
+        self.assertEqual(json.loads(first[-1].read_text())["signing"], "unsigned Windows development packages")
         with zipfile.ZipFile(first[1]) as archive:
             self.assertEqual(set(archive.namelist()), {"MicDrop.exe", "micdrop_rtc.dll", "README.md", "BETA_TESTING.md",
                 "LICENSE", "NOTICE", "WEBRTC-NOTICE.txt", "WEBRTC-VERSIONS.txt",
                 "QR-CODE-NOTICE.txt", "DISCOVERY-NOTICES.txt", "WEBSOCKET-NOTICE.txt"})
+
+    def test_windows_authenticode_signatures_are_inspected(self):
+        self.windows()
+        base_records = [
+            {
+                "file": name,
+                "status": "Valid",
+                "status_message": "Signature verified.",
+                "subject": "CN=Noah Seymour, O=Noah Seymour, C=US",
+                "issuer": "CN=Microsoft ID Verified CS EOC CA 01",
+                "sha256": "d" * 64,
+                "timestamped": True,
+            }
+            for name in ("MicDrop.exe", "micdrop_rtc.dll", "MicDrop-0.1.0-beta.1-windows-x64-setup.exe")
+        ]
+
+        def make_cmd(records):
+            def _cmd(args):
+                if args[0] == "pwsh":
+                    return json.dumps(records)
+                return self.windows_command(args)
+            return _cmd
+
+        signed = release.stage("windows", self.artifacts, self.root / "win-signed", 42, 1, SHA, IDENTITY, make_cmd(base_records))
+        meta = json.loads(signed[-1].read_text())
+        self.assertEqual(meta["signing"], "Authenticode-signed and timestamped Windows x64 installer and portable payload")
+        self.assertEqual(meta["signer_subject"], "CN=Noah Seymour, O=Noah Seymour, C=US")
+        self.assertEqual(meta["certificate_sha256"], "d" * 64)
+
+        bad_cases = [
+            ("mixed", [{**base_records[0], "status": "NotSigned"}, base_records[1], base_records[2]], "Inconsistent Windows Authenticode"),
+            ("invalid", [base_records[0], {**base_records[1], "status": "HashMismatch"}, base_records[2]], "Invalid Windows Authenticode"),
+            ("untimestamped", [base_records[0], base_records[1], {**base_records[2], "timestamped": False}], "missing an RFC 3161 timestamp"),
+            ("mismatched_subject", [base_records[0], base_records[1], {**base_records[2], "subject": "CN=Other"}], "Mismatched Windows Authenticode"),
+        ]
+        for label, records, pattern in bad_cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, pattern):
+                release.stage("windows", self.artifacts, self.root / f"win-bad-{label}", 42, 1, SHA, IDENTITY, make_cmd(records))
 
     def assert_invalid_windows_manifest(self, change):
         self.windows(change)
