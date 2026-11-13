@@ -16,7 +16,7 @@
 
 ## Capabilities and Design
 
-- **Native AppKit UI (`internal/desktop/appkit_darwin_arm64.m`, `ui_darwin_arm64.go`, `phone_settings_darwin_arm64.go`):**
+- **Native AppKit UI (`internal/desktop/appkit_darwin_arm64.m`, `ui_darwin_arm64.go`, `phone_settings_unix.go`):**
   - Persistent header with host state, Start/Stop controls, connected device summary, live transport metrics (`Network RTT`, `RTP jitter`, `Playback buffer`, `Output queue`), and `Device settings…`.
   - **Audio:** Select `Default macOS output` or a specific CoreAudio output endpoint for desktop playback capture, and select `Disabled — desktop playback only` or a user-space virtual audio cable (such as BlackHole 2ch) for phone microphone return.
   - **Connection:** Explicit private IPv4 LAN adapter picker, control port (`9844` default), opt-in remote connections toggle, `Import remote config…` (`NSOpenPanel`), `Forget remote config`, and `macOS Firewall…` shortcut.

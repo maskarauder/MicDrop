@@ -102,6 +102,9 @@ func TestDefaultDesktopLaunchArguments(t *testing.T) {
 		{"/Applications/MicDrop.app/Contents/MacOS/MicDrop", []string{"version"}, "darwin", []string{"version"}},
 		{"/usr/local/bin/micdrop-host", nil, "darwin", nil},
 		{"/usr/local/bin/micdrop-host", nil, "linux", nil},
+		{"/usr/local/bin/MicDrop", nil, "linux", []string{"desktop"}},
+		{"/usr/local/bin/micdrop-desktop", []string{"--background"}, "linux", []string{"desktop", "--background"}},
+		{"/usr/local/bin/MicDrop", []string{"doctor"}, "linux", []string{"doctor"}},
 	}
 	for _, tc := range cases {
 		got := defaultArgs(tc.arg0, tc.args, tc.goos)
@@ -113,5 +116,11 @@ func TestDefaultDesktopLaunchArguments(t *testing.T) {
 				t.Fatalf("defaultArgs(%q, %v, %q)[%d] = %q, want %q", tc.arg0, tc.args, tc.goos, i, got[i], tc.want[i])
 			}
 		}
+	}
+	if run([]string{"desktop", "--install-launcher", "--uninstall-launcher"}, io.Discard, io.Discard) != 2 {
+		t.Fatal("accepted conflicting desktop launcher flags")
+	}
+	if run([]string{"desktop", "--install-launcher", "--background"}, io.Discard, io.Discard) != 2 {
+		t.Fatal("accepted conflicting desktop launcher and background flags")
 	}
 }

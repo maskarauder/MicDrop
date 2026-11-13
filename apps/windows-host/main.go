@@ -51,6 +51,15 @@ func defaultArgs(arg0 string, args []string, goos string) []string {
 		}
 		return filtered
 	}
+	if goos == "linux" && (base == "MicDrop" || base == "micdrop-desktop") {
+		if len(args) == 0 {
+			return []string{"desktop"}
+		}
+		if len(args) == 1 && args[0] == "--background" {
+			return []string{"desktop", "--background"}
+		}
+		return args
+	}
 	return args
 }
 
@@ -75,7 +84,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		}
 		return 0
 	case "desktop":
-		return runDesktop(args[1:], stderr)
+		return runDesktop(args[1:], stdout, stderr)
 	case "remote":
 		return runRemote(args[1:], stdout, stderr)
 	case "bridge-devices":

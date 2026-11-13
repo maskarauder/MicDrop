@@ -272,6 +272,30 @@ encrypted with a user-only (`0600`) AES-256-GCM master key and guarded by `flock
 See [PLATFORM_AUDIO.md](PLATFORM_AUDIO.md) for PipeWire/PulseAudio `module-null-sink`
 and macOS CoreAudio Process Tap / BlackHole virtual cable setup.
 
+### Linux desktop app (`micdrop-host desktop`)
+
+On x86\_64 Linux, the same `micdrop-host` binary includes the native GTK3 desktop
+UI (`internal/desktop/gtk_linux_amd64.c`, `ui_linux_amd64.go`) with full feature
+parity to `MicDrop.exe` and `MicDrop.app`. Because GTK3, GDK3, Cairo, GIO, and
+optional AppIndicator libraries are loaded at runtime via `dlopen`, compiling
+`micdrop-host` does not require `-dev` GTK headers and headless servers/containers
+do not need GUI packages installed to run CLI subcommands.
+
+```sh
+# Launch the Linux desktop UI (requires an active Wayland or X11 session + libgtk-3-0 / libgtk-3-0t64):
+./build/host/micdrop-host desktop
+
+# Optional: register or remove a per-user XDG application launcher (~/.local/share/applications/micdrop.desktop):
+./build/host/micdrop-host desktop --install-launcher
+./build/host/micdrop-host desktop --uninstall-launcher
+
+# Run the automated GTK3 desktop UI contract checks on a headless machine using Xvfb:
+xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
+```
+
+See [Linux desktop](LINUX_DESKTOP.md) for XDG autostart, optional AppIndicator
+panel tray behavior, and PipeWire/PulseAudio virtual microphone setup.
+
 ### macOS desktop app (`MicDrop.app`)
 
 On Apple Silicon macOS (macOS 14.2+), the same `apps/windows-host` package also

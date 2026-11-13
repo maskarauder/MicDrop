@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-//go:build darwin && arm64
+//go:build (darwin && arm64) || (linux && amd64)
 
 package desktop
-
-/*
-#include "appkit_darwin.h"
-*/
-import "C"
 
 import (
 	"bytes"
@@ -213,7 +208,7 @@ func (u *desktopWindow) phoneSettingSelected() {
 			uiCheck(idPhoneFieldBool, value)
 		case "int":
 			uiSetText(idPhoneFieldInt, string(field.Value))
-			C.md_ui_set_max_length(C.int(idPhoneFieldInt), 12)
+			uiSetMaxLength(idPhoneFieldInt, 12)
 			if field.Minimum != nil && field.Maximum != nil {
 				effect += fmt.Sprintf("\nAllowed: %d–%d.", *field.Minimum, *field.Maximum)
 			}
@@ -246,11 +241,7 @@ func (u *desktopWindow) phoneEditorVisibility() {
 		{idPhoneFieldInt, "int"},
 		{idPhoneFieldChoice, "choice"},
 	} {
-		visible := C.int(0)
-		if u.page == 4 && field != nil && field.Kind == item.kind {
-			visible = 1
-		}
-		C.md_ui_set_visible(C.int(item.id), visible)
+		uiSetVisible(item.id, u.page == 4 && field != nil && field.Kind == item.kind)
 	}
 }
 

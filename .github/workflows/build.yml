@@ -187,6 +187,54 @@ jobs:
           path: build/macos-desktop-preview/*.png
           if-no-files-found: error
           retention-days: 14
+      - name: Check native Linux desktop controls
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          MICDROP_DESKTOP_PREVIEW_DIR: ${{ github.workspace }}/build/linux-desktop-preview
+        run: |
+          set -euo pipefail
+          if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xauth >/dev/null 2>&1 || ! ldconfig -p | grep -q 'libgtk-3\.so\.0'; then
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              for mirror in \
+                "https://mirrors.edge.kernel.org/ubuntu/" \
+                "https://ftp.osuosl.org/pub/ubuntu/" \
+                "http://azure.archive.ubuntu.com/ubuntu/" \
+                "https://archive.ubuntu.com/ubuntu/"; do
+                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
+                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
+                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+                  break
+                fi
+              done
+            fi
+            APT_OPTS=(
+              -o Acquire::ForceIPv4=true
+              -o Acquire::Retries=1
+              -o Acquire::http::Timeout=5
+              -o Acquire::https::Timeout=5
+              -o Acquire::http::No-Cache=false
+              -o Acquire::https::No-Cache=false
+            )
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
+            GTK_PKG="libgtk-3-0t64"
+            if ! apt-cache show "$GTK_PKG" >/dev/null 2>&1; then
+              GTK_PKG="libgtk-3-0"
+            fi
+            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
+              xvfb xauth fonts-dejavu-core adwaita-icon-theme "$GTK_PKG"
+          fi
+          xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
+      - name: Retain Linux desktop UI preview
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.upload_artifacts == true }}
+          name: linux-desktop-preview
+          path: build/linux-desktop-preview/*.png
+          if-no-files-found: error
+          retention-days: 14
       - name: Check native Windows desktop controls
         if: runner.os == 'Windows'
         shell: pwsh
@@ -275,6 +323,17 @@ jobs:
           test -x "$RTC_LIB"
           if [ "$RUNNER_OS" = "macOS" ]; then
             codesign --verify --strict --verbose=2 "$RTC_LIB" "$HOST_BIN"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            if readelf -d "$HOST_BIN" | grep -E 'NEEDED.*(gtk|gdk|cairo|X11|wayland)'; then
+              echo "Unexpected hard GUI shared-library dependency in micdrop-host" >&2
+              exit 1
+            fi
+            XDG_DATA_TEST="$RUNNER_TEMP/micdrop-xdg-data"
+            rm -rf "$XDG_DATA_TEST"
+            env -u DISPLAY -u WAYLAND_DISPLAY XDG_DATA_HOME="$XDG_DATA_TEST" "$HOST_BIN" desktop --install-launcher
+            test -f "$XDG_DATA_TEST/applications/micdrop.desktop"
+            env -u DISPLAY -u WAYLAND_DISPLAY XDG_DATA_HOME="$XDG_DATA_TEST" "$HOST_BIN" desktop --uninstall-launcher
+            test ! -e "$XDG_DATA_TEST/applications/micdrop.desktop"
           fi
           "$HOST_BIN" version
           "$HOST_BIN" doctor

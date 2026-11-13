@@ -11,6 +11,7 @@ implementations, along with each platform's verified scope and remaining checks.
 | [Windows package README](WINDOWS_PACKAGE.md) | Self-contained guide shipped as README.md |
 | [Windows installer](WINDOWS_INSTALLER.md) | Install location, upgrades, removal and preserved data |
 | [Windows desktop](WINDOWS_DESKTOP.md) | Audio/network choices, phones, settings, startup and logs |
+| [Linux desktop](LINUX_DESKTOP.md) | GTK3 `micdrop-host desktop` UI, XDG launcher/autostart, tray, and virtual mic setup |
 | [macOS desktop](MACOS_DESKTOP.md) | Experimental Apple Silicon `MicDrop.app`, permissions, startup, and hardware feedback |
 | [Android](ANDROID.md) | Modes, routes, permissions, diagnostics and updates |
 | [iPhone app](DEVELOPMENT.md#iphone-app) | Building, sideloading, platform differences, and device scope |

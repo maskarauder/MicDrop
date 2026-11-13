@@ -2,16 +2,17 @@
 
 Use your Android phone or iPhone—and its connected headphones or headset—as a
 wireless speaker, microphone, or two-way headset for your Windows 11 PC, with
-experimental Linux x64 CLI and Apple Silicon macOS 14.2+ desktop host support.
+experimental Linux x64 and Apple Silicon macOS 14.2+ desktop and CLI host support.
 
 **Status: public beta.** Windows and Android LAN/remote streaming have passed
 functional acceptance on tested hardware; the iPhone app has passed Apple CI and
 initial LAN duplex/mute checks, with broader physical route, locked-screen, and
-remote device testing still underway. The Linux x64 CLI host (`micdrop-host`) is
-verified against live PulseAudio/PipeWire loopback in CI, and the Apple Silicon
-macOS 14.2+ host (`MicDrop.app` and `micdrop-host`) is verified in `macos-26` CI
-(AppKit UI, bundle/signing, and WebRTC loopback) — **community feedback from
-physical Apple Silicon Mac hardware is actively requested** (see
+remote device testing still underway. The Linux x64 host (`micdrop-host` CLI and
+GTK3 `micdrop-host desktop` GUI) is verified against live PulseAudio/PipeWire
+loopback and Xvfb GTK3 UI contracts in CI, and the Apple Silicon macOS 14.2+ host
+(`MicDrop.app` and `micdrop-host`) is verified in `macos-26` CI (AppKit UI,
+bundle/signing, and WebRTC loopback) — **community feedback from physical Apple
+Silicon Mac hardware is actively requested** (see
 [macOS desktop](docs/MACOS_DESKTOP.md#hardware-testing-status--feedback-wanted)).
 
 ## Features
@@ -39,7 +40,7 @@ Download matching desktop and phone packages from the latest release on the
 | **Android 12+ (arm64)** | `MicDrop-*-android-arm64-dev.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
 | **iPhone (iOS 17+ arm64)** | `MicDrop-*-ios-arm64-unsigned.ipa` | Sideload with your Apple ID via AltStore, SideStore, Sideloadly, or Xcode ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
 | **macOS 14.2+ (Apple Silicon arm64)** | Built from source / CI artifact (`macos-arm64-app`, `macos-arm64-host`) | Experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md)); Apple Silicon hardware feedback welcome |
-| **Linux (x64)** | Built from source / CI artifact (`linux-x64-host`) | PipeWire/PulseAudio CLI host ([audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
+| **Linux (x64)** | Built from source / CI artifact (`linux-x64-host`) | GTK3 desktop GUI & PipeWire/PulseAudio CLI host ([desktop guide](docs/LINUX_DESKTOP.md), [audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
 
 ### Setup in 4 Steps
 
