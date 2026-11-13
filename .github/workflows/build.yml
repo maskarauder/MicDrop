@@ -497,15 +497,21 @@ jobs:
         uses: ./.github/actions/store-artifact
         with:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
           name: linux-x64-host
           path: build/host-dist/MicDrop-linux-x64-host.tar.gz
           if-no-files-found: error
           retention-days: 14
+      - name: Verify Linux draft-release packaging without uploading
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 tools/draft_release.py stage --platform linux --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
       - name: Retain macOS CLI host
         if: runner.os == 'macOS'
         uses: ./.github/actions/store-artifact
         with:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
           name: macos-arm64-host
           path: build/host-dist/MicDrop-macos-arm64-host.tar.gz
           if-no-files-found: error
@@ -545,10 +551,15 @@ jobs:
         uses: ./.github/actions/store-artifact
         with:
           upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
           name: macos-arm64-app
           path: build/macos-app-dist/MicDrop-macos-arm64-app.zip
           if-no-files-found: error
           retention-days: 14
+      - name: Verify macOS draft-release packaging without uploading
+        if: runner.os == 'macOS'
+        shell: bash
+        run: python3 tools/draft_release.py stage --platform macos --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
       - name: Build Windows desktop app
         if: runner.os == 'Windows'
         env:

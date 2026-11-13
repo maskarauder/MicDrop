@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +21,8 @@ import zipfile
 
 from check_ios_bundle import check_ipa
 from ios_version import bundle_versions
+from macos_app_bundle import DEFAULT_BUNDLE_ID as MACOS_BUNDLE_ID, DEFAULT_MIN_MACOS, check_app_zip
+from package_unix_host import PLATFORMS as UNIX_HOST_PLATFORMS, check_host_tarball
 from release_version import ROOT, VERSION_PATH, parse, read
 from store_artifact import KIND, anchor_nonlink, reject_links
 from windows_payload import PORTABLE, INSTALLER_ONLY
@@ -66,6 +70,41 @@ def run_command(arguments):
     if result.returncode:
         raise ValueError(f"Package verification failed: {Path(arguments[0]).name}")
     return result.stdout
+
+
+def _extract_verified_host_tarball(tar_path, destination):
+    with tarfile.open(tar_path, mode="r:gz") as archive:
+        for member in archive.getmembers():
+            target = destination / member.name.rstrip("/")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                if os.name != "nt":
+                    os.chmod(target, member.mode & 0o777)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                stream = archive.extractfile(member)
+                with target.open("wb") as out:
+                    if stream is not None:
+                        shutil.copyfileobj(stream, out)
+                if os.name != "nt":
+                    os.chmod(target, member.mode & 0o777)
+
+
+def _extract_verified_app_zip(zip_path, destination):
+    with zipfile.ZipFile(zip_path) as archive:
+        for item in archive.infolist():
+            target = destination / item.filename.rstrip("/")
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                if os.name != "nt":
+                    os.chmod(target, 0o755)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(item) as src, target.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+                if os.name != "nt":
+                    perms = (item.external_attr >> 16) & 0o777
+                    os.chmod(target, perms if perms else 0o644)
 
 
 def stage(platform, root, output, run_id, attempt, sha, identity, command=run_command, *, ios_ipa=None):
@@ -120,6 +159,65 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
                     shutil.copyfileobj(source, target)
         packages.append(portable)
         info["signing"] = "unsigned Windows development packages"
+    elif platform == "linux":
+        files = retained(root, "linux-x64-host", run_id, attempt, sha)
+        tarball = files["MicDrop-linux-x64-host.tar.gz"]
+        check_host_tarball(tarball, platform="linux-x64")
+        with tempfile.TemporaryDirectory() as extracted_name:
+            extracted = Path(extracted_name)
+            _extract_verified_host_tarball(tarball, extracted)
+            top_dir = UNIX_HOST_PLATFORMS["linux-x64"]["top_dir"]
+            actual = json.loads(command([extracted / top_dir / "micdrop-host", "version"]))
+        if any(actual.get(k) != v for k, v in {**identity, "revision": sha, "modified": False, "platform": "linux/amd64"}.items()):
+            raise ValueError("Embedded Linux build identity mismatch: micdrop-host")
+        target = output / f"{prefix}-linux-x64-host.tar.gz"
+        shutil.copyfile(tarball, target)
+        packages.append(target)
+        info["signing"] = "unsigned Linux x64 CLI and GTK3 desktop bundle"
+    elif platform == "macos":
+        app_files = retained(root, "macos-arm64-app", run_id, attempt, sha)
+        host_files = retained(root, "macos-arm64-host", run_id, attempt, sha)
+        app_zip = app_files["MicDrop-macos-arm64-app.zip"]
+        host_tar = host_files["MicDrop-macos-arm64-host.tar.gz"]
+        check_app_zip(
+            app_zip,
+            bundle_id=MACOS_BUNDLE_ID,
+            minimum_os=DEFAULT_MIN_MACOS,
+            revision=sha[:12],
+            shared_identity=identity,
+        )
+        check_host_tarball(host_tar, platform="macos-arm64", minimum_macos=DEFAULT_MIN_MACOS)
+        with tempfile.TemporaryDirectory() as extracted_name:
+            extracted = Path(extracted_name)
+            app_root = extracted / "app"
+            host_root = extracted / "host"
+            _extract_verified_app_zip(app_zip, app_root)
+            _extract_verified_host_tarball(host_tar, host_root)
+            app_bundle = app_root / "MicDrop.app"
+            app_exe = app_bundle / "Contents/MacOS/MicDrop"
+            top_dir = UNIX_HOST_PLATFORMS["macos-arm64"]["top_dir"]
+            cli_exe = host_root / top_dir / "micdrop-host"
+            cli_dylib = host_root / top_dir / UNIX_HOST_PLATFORMS["macos-arm64"]["rtc_lib"]
+            command(["codesign", "--verify", "--deep", "--strict", app_bundle])
+            command(["codesign", "--verify", "--strict", cli_dylib, cli_exe])
+            expected_embed = {**identity, "revision": sha, "modified": False, "platform": "darwin/arm64"}
+            app_actual = json.loads(command([app_exe, "version"]))
+            if any(app_actual.get(k) != v for k, v in expected_embed.items()):
+                raise ValueError("Embedded macOS build identity mismatch: MicDrop.app")
+            cli_actual = json.loads(command([cli_exe, "version"]))
+            if any(cli_actual.get(k) != v for k, v in expected_embed.items()):
+                raise ValueError("Embedded macOS build identity mismatch: micdrop-host")
+        app_target = output / f"{prefix}-macos-arm64-app.zip"
+        shutil.copyfile(app_zip, app_target)
+        packages.append(app_target)
+        host_target = output / f"{prefix}-macos-arm64-host.tar.gz"
+        shutil.copyfile(host_tar, host_target)
+        packages.append(host_target)
+        info.update({
+            "bundle_id": MACOS_BUNDLE_ID,
+            "minimum_os": DEFAULT_MIN_MACOS,
+            "signing": "ad-hoc signed macOS arm64 app bundle and CLI host",
+        })
     elif platform == "android":
         files = retained(root, "android-apk", run_id, attempt, sha)
         apk = files["app-debug.apk"]
@@ -263,7 +361,8 @@ def marker(run):
 def release_body(run, identity, notes, complete):
     status = "Packages verified; draft awaits human review." if complete else "INCOMPLETE: package uploads/verification are still pending. Do not publish."
     return (marker(run) + "\n\n" + status + "\n\n" + notes.strip() + "\n\n"
-            + "Development packages: Windows is unsigned; Android uses the existing development signer and `com.maskarauder.micdrop.dev`. "
+            + "Development packages: Windows and Linux x64 are unsigned; macOS arm64 uses ad-hoc code signing (`com.maskarauder.micdrop.mac`); "
+            + "Android uses the existing development signer and `com.maskarauder.micdrop.dev`. "
             + "First-party source is MPL-2.0; provide recipients with matching source and notices. "
             + "Production signing and store distribution remain separate release work.\n\n"
             + f"Source: `{run['head_sha']}` · Android version code: `{identity['android_version_code']}`\n\n"
@@ -315,7 +414,21 @@ def finish(api, release_id, run, identity, notes, output):
     if release["body"] not in {release_body(run, identity, notes, False), release_body(run, identity, notes, True)}:
         raise ValueError("Release notes were edited manually; refusing to overwrite them")
     prefix = "MicDrop-" + identity["version"]
-    required = {prefix + suffix for suffix in ("-windows-x64-setup.exe", "-windows-x64-portable.zip", "-android-arm64-dev.apk", "-windows-build.json", "-android-build.json")}
+    required = {
+        prefix + suffix
+        for suffix in (
+            "-windows-x64-setup.exe",
+            "-windows-x64-portable.zip",
+            "-windows-build.json",
+            "-linux-x64-host.tar.gz",
+            "-linux-build.json",
+            "-macos-arm64-app.zip",
+            "-macos-arm64-host.tar.gz",
+            "-macos-build.json",
+            "-android-arm64-dev.apk",
+            "-android-build.json",
+        )
+    }
     optional_ios = {prefix + suffix for suffix in ("-ios-arm64-unsigned.ipa", "-ios-build.json")}
     assets = api.listing(f"/releases/{release_id}/assets")
     allowed = required | optional_ios | {"release-manifest.json", "SHA256SUMS"}
@@ -361,7 +474,7 @@ def artifact_root():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["stage", "prepare", "upload", "finish"])
-    parser.add_argument("--platform", choices=["windows", "android", "ios"])
+    parser.add_argument("--platform", choices=["windows", "linux", "macos", "android", "ios"])
     parser.add_argument("--ios-ipa", type=Path,
                         help="Downloaded unsigned IPA for iOS stage/upload, built from the selected source commit")
     parser.add_argument("--run-id", required=True)

@@ -17,8 +17,8 @@ settings:
     # Local defaults only: CI passes the shared internal/version/version.properties values
     # (tools/ios_version.py) to xcodebuild.
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "3"
-    MICDROP_VERSION_NAME: "0.1.0-beta.2"
+    CURRENT_PROJECT_VERSION: "4"
+    MICDROP_VERSION_NAME: "0.1.0-beta.3"
     MICDROP_REVISION: local
     CODE_SIGN_STYLE: Manual
     CODE_SIGNING_ALLOWED: "NO"
