@@ -3,9 +3,11 @@
 The portable Swift package `apps/ios/MicDropKit` builds on Linux using the pinned
 Swift image below, either locally (including WSL2) or in GitHub Actions. The
 iPhone app workflow runs on GitHub-hosted `macos-26` runners with the pinned
-Xcode below; see [iPhone CI build](../docs/DEVELOPMENT.md#iphone-ci-build). The
-IPA is unsigned; signing happens on the user's computer (Sideloadly or iloader with the
-user's Apple ID, see [DEVELOPMENT.md](../docs/DEVELOPMENT.md#install-on-iphone)).
+Xcode below; see [iPhone CI build](../docs/DEVELOPMENT.md#iphone-ci-build).
+Non-PR CI runs build both an `Apple Distribution` signed archive for App Store
+Connect / TestFlight and an unsigned sideload IPA (signed on the user's computer
+with Sideloadly or iloader using their Apple ID; see
+[DEVELOPMENT.md](../docs/DEVELOPMENT.md#install-on-iphone)).
 WebRTC is recorded in [WEBRTC.md](WEBRTC.md).
 
 | Component | Pinned source / package | License and packaging |

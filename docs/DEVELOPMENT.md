@@ -31,12 +31,13 @@ shared C++ tone diagnostics remain available across Windows, Linux, and macOS.
 | Android compile / target SDK | 36 |
 | Android Build Tools | 35.0.0 |
 | Android NDK | 27.0.12077973, for packaging prebuilt native libraries |
-| iPhone | iOS 17.0+, arm64 iPhone; unsigned development IPA, sideloaded |
+| iPhone | iOS 17.0+, arm64 iPhone (`com.maskarauder.micdrop`); TestFlight distribution IPA (`Apple Distribution`) and unsigned sideload IPA |
 | Xcode | 26.6 (17F113) on GitHub-hosted `macos-26`; iOS SDK 26.5 |
 | Swift | 6.3 toolchain (Xcode 26.6; Linux `swift:6.3.3-noble` by digest); Swift 5 language mode |
 | XcodeGen | 2.46.0 release zip, SHA-256 `4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806` |
 | SwiftPM packages | Exact versions in `apps/ios/MicDropKit/Package.swift`; pins in its `Package.resolved`; see [iPhone provenance](../third_party/IOS.md) |
 | WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Linux, macOS, Android, and iPhone; checksummed assets in the lock file |
+| Windows Authenticode signing | Microsoft `SignTool` (`Microsoft.Windows.SDK.BuildTools` `10.0.28000.2957`) + `Azure.CodeSigning.Dlib` (`Microsoft.ArtifactSigning.Client` `1.0.146`), pinned by SHA-256 in `tools/windows_signing.py` |
 | Dependency fetcher | Python 3.11+ |
 
 These are selected compatible versions, not a claim that they are the newest.
@@ -530,7 +531,10 @@ the numeric `MAJOR.MINOR.PATCH` as `CFBundleShortVersionString`, the Android ver
 `upload_artifacts` enabled (the default), CI uploads `ios-ipa` directly as `MicDrop.ipa` for 14 days
 and writes **Download MicDrop.ipa** and the SHA-256 to the job summary; `main` builds also upload
 `ios-ipa-retained` for 14 days for [draft release assembly](RELEASING.md). Keep your downloaded copy
-for 7-day re-signing.
+for 7-day re-signing. On non-PR runs when the Apple distribution secrets are configured, the workflow
+also builds and signs an App Store Connect archive (`Apple Distribution` + explicit provisioning
+profile for `com.maskarauder.micdrop`), uploads `ios-appstore-ipa` (`MicDrop-appstore.ipa`), and
+submits the IPA to **TestFlight** when `upload_testflight: true` is selected on `workflow_dispatch`.
 
 A failed build lists the unique compiler errors at the end of the **Build unsigned iPhone app**
 step, annotates the first ones on the affected files, and uploads the quiet `xcodebuild` log as
@@ -558,6 +562,10 @@ framework has no x86_64 simulator slice. They do not test native WebRTC media; a
 use the real framework. Portable Swift tests continue to run on Linux.
 
 ### Install on iPhone
+
+Invited beta testers can install **MicDrop** directly through Apple **TestFlight** without a PC or
+7-day re-signing. To self-sign and sideload the unsigned `MicDrop.ipa` from CI or GitHub Releases
+instead, use the steps below.
 
 One-time Windows setup: install Sideloadly from <https://sideloadly.io/> and the **web**
 (non-Microsoft Store) versions of iTunes and iCloud from apple.com; uninstall Store versions first
@@ -601,19 +609,23 @@ same Wi-Fi (Bonjour, installed with iTunes, is required for Wi-Fi). A free accou
 **3** sideloaded apps installed and create **10** App IDs per 7 days. Use the normal Apple ID
 password; app-specific passwords only partly work, and only with a paid developer account.
 
-The provisional bundle ID is `com.maskarauder.micdrop.dev`. Re-sideload with the same Apple ID and
-bundle ID to refresh or update in place; this keeps settings, the saved connection and the pairing
-identity, so Windows needs no new approval. A different Apple ID or a changed bundle ID needs
-**Forget saved connection** and re-pairing, and the old phone key should be removed on Windows
+The iPhone bundle ID is `com.maskarauder.micdrop` (upgrading from an older `.dev` sideload installs
+alongside or replaces the old app and requires re-pairing once). Re-sideload with the same Apple ID
+and bundle ID to refresh or update in place; this keeps settings, the saved connection and the pairing
+identity, so the desktop host needs no new approval. A different Apple ID or a changed bundle ID needs
+**Forget saved connection** and re-pairing, and the old phone key should be removed on the desktop host
 (`Phones → Remove selected phone` in the desktop app, or `devices`, then `revoke <full-phone-key>`
 in the console). Deleting the app removes its data; the next install
-starts without the old pairing, and Windows still needs removal for the old key.
+starts without the old pairing, and the host still needs removal for the old key.
 
-Never put an Apple ID, app-specific password, certificate, provisioning profile or App Store
-Connect key into repository secrets or files; CI stays secret-free. Fork pull requests also build
-unsigned IPAs from their own code: sideload only builds of `main` or your own branches. CI does not
-malware-scan the IPA; your own Apple ID's signing at install time is the integrity boundary, so
-verify the SHA-256 shown in the summary.
+Repository Actions secrets (`APPLE_TEAM_ID`, `APPLE_DEV_ID_P12_BASE64`, `APPLE_DEV_ID_P12_PASSWORD`,
+`APPLE_DIST_P12_BASE64`, `APPLE_DIST_P12_PASSWORD`, `APPLE_IOS_PROVISION_PROFILE_BASE64`,
+`APPLE_API_PRIVATE_KEY_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) are never committed to
+source control and are never exposed to `pull_request` runs (`tools/apple_signing.py` imports `.p12`
+identities into an ephemeral `$RUNNER_TEMP` keychain and removes the keychain, profiles, and `.p8`
+file under `if: always()`). Never put a personal Apple ID password or 2FA session into repository
+secrets. Fork pull requests still build unsigned IPAs and ad-hoc macOS packages from their own code:
+sideload only builds of `main` or your own branches, and verify the SHA-256 shown in the job summary.
 
 A periodic sine, RTT or output-buffer counter is not a physical latency result.
 Follow [measurement requirements](LATENCY.md), record the actual route and
@@ -631,12 +643,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows payload preparation failed.' }
 ./tools/build_windows_installer.ps1 -PayloadDirectory build/host -OutputDirectory build/windows-installer
 ```
 
-`tools/windows_payload.json` is the shared release allowlist. The working
-`build/host` directory and internal `windows-x64-harness` artifact may also
-contain the console program; never ZIP that whole directory for testers.
-[Draft assembly](RELEASING.md) creates the curated portable ZIP and verifies
-its runtime, notices and guides against the installer manifest. Neither package
-contains internal reports, ADB commands or latency tooling.
+On non-PR CI runs when the Azure Artifact Signing secrets are configured, CI signs
+`build/host/MicDrop.exe` and `build/host/micdrop_rtc.dll` via `tools/windows_signing.py`
+and passes `-SignInstaller` to `build_windows_installer.ps1` (while local developer and
+pull-request builds run unsigned). `tools/windows_payload.json` is the shared release
+allowlist. The working `build/host` directory and internal `windows-x64-harness` artifact
+may also contain the console program; never ZIP that whole directory for testers.
+[Draft assembly](RELEASING.md) creates the curated portable ZIP and verifies its runtime,
+notices and guides against the installer manifest. Neither package contains internal
+reports, ADB commands or latency tooling.
 
 ## CI and dependency provenance
 
@@ -650,9 +665,11 @@ A separate API 35 KVM emulator job on `ubuntu-24.04` checks Android Keystore sig
 and Conscrypt mutual TLS. Linux checks the known-offset measurement fixtures in an
 isolated Python virtual environment. Windows, Linux (`linux-x64-host`:
 `MicDrop-linux-x64-host.tar.gz`), and macOS (`macos-arm64-host`:
-`MicDrop-macos-arm64-host.tar.gz`) jobs also package, extract, and smoke-test the
-Go CLI host with its native WebRTC shared library (`doctor`, `rtc-check`, and
-`tone`) without requiring a physical audio endpoint.
+`MicDrop-macos-arm64-host.tar.gz` and `macos-arm64-app`: `MicDrop-macos-arm64-app.zip`)
+jobs also package, extract, and smoke-test the Go host with its native WebRTC shared
+library (`doctor`, `rtc-check`, and `tone`) without requiring a physical audio endpoint;
+non-PR runs with configured cloud-signing secrets Authenticode-sign and timestamp the
+Windows payload/installer and Developer ID sign + Apple-notarize the macOS packages.
 
 On pushes to `main` and manual workflow runs (`upload_artifacts` defaults to `true`),
 CI uploads build outputs and verification reports to GitHub Actions for 14 days
@@ -661,6 +678,7 @@ When the stable Android development signer is configured, `android-apk` uses
 `upload-artifact` single-file mode (`archive: false`) so its download URL appears
 directly in the job summary. Main-branch builds also upload 14-day `*-retained`
 release bundles (`windows-x64-harness-retained`, `windows-x64-installer-retained`,
+`linux-x64-host-retained`, `macos-arm64-host-retained`, `macos-arm64-app-retained`,
 `android-apk-retained`, and `ios-ipa-retained`) containing `manifest.json` and
 `SHA256SUMS` so [draft release assembly](RELEASING.md) can promote exact verified
 packages across ephemeral GitHub-hosted VMs.
@@ -672,9 +690,11 @@ job logs rather than treated as a fully hermetic toolchain.
 The **iPhone portable Swift contracts** job builds and tests `MicDropKit` on `ubuntu-24.04`
 in the digest-pinned Swift image, and the **iPhone Swift formatting** job checks Swift
 formatting. The path-filtered **iPhone app** workflow runs on GitHub-hosted `macos-26`
-runners and publishes the unarchived `MicDrop.ipa` after the pin, bundle, Mach-O and
-unsigned checks. Device behavior (background audio, routes, Secure Enclave, Local Network,
-and Sideloadly/iloader re-signing) remains manual.
+runners, publishes the unarchived `MicDrop.ipa` after the pin, bundle, Mach-O and
+unsigned checks, and on non-PR runs with Apple distribution secrets also builds and
+verifies `MicDrop-appstore.ipa` (with optional `upload_testflight: true` submission).
+Device behavior (background audio, routes, Secure Enclave, Local Network, and
+TestFlight or Sideloadly/iloader installation) remains manual.
 
 Before publishing the Windows harness, CI configures the ephemeral runner with
 `./tools/scan_windows.ps1 -ConfigureEphemeralRunner` (disabling cloud MAPS reporting
@@ -739,11 +759,13 @@ Use the [latency tools](../tools/latency/README.md) for physical measurements.
 For beta delivery, verify matching package versions and source, notices, an
 in-place Android update with the stable signer, and Windows install/upgrade
 behavior. [Releasing](RELEASING.md) covers the draft release workflow.
-Production code signing and store delivery remain separate milestones.
+Windows Authenticode signing, macOS Developer ID notarization, and iOS
+TestFlight signing are wired into CI; Google Play Store signing and public
+App Store / Play Store release remain separate milestones.
 
 ## Versioned draft packages
 
-Windows, Windows Setup, Android and iPhone versions share
+Windows, Windows Setup, Linux, macOS, Android, and iPhone versions share
 `internal/version/version.properties`. See [RELEASING.md](RELEASING.md) for
 version-code ordering, main-branch `*-retained` artifact promotion into an
 unpublished GitHub draft, checksums and retry behavior.

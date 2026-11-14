@@ -82,10 +82,15 @@ requires exiting/uninstalling MicDrop and manually removing
 
 ## Security detections and reports
 
-These development builds are unsigned. A Windows publisher/reputation warning
-and an antivirus malware detection are different checks. If a file is flagged,
-stop and send the maintainer the exact detection, affected file, time, and
-whether it happened during download, setup, upgrade, or launch. Check Windows
+When Azure Artifact Signing credentials are configured, official `main`-branch
+and release packages are Authenticode-signed and timestamped (unconfigured,
+local developer, and pull-request builds remain unsigned; see the release notes
+and `MicDrop-<version>-windows-build.json` for verified status). Newly
+issued code-signing certificates still build Windows SmartScreen download
+reputation gradually, and a SmartScreen reputation prompt and an antivirus
+malware detection are different checks. If a file is flagged as malware, stop
+and send the maintainer the exact detection, affected file, time, and whether
+it happened during download, setup, upgrade, or launch. Check Windows
 Security's **Protection history** and update its protection intelligence. Do not
 disable protection or create an exclusion to make a beta install work.
 

@@ -1,4 +1,4 @@
-"""Check the unsigned iPhone IPA's entries, Info.plist, Mach-O targets, WebRTC embedding and notices."""
+"""Check unsigned or App Store signed iPhone IPAs: entries, Info.plist, PrivacyInfo, icons, Mach-O, WebRTC, and notices."""
 import argparse
 import hashlib
 import plistlib
@@ -37,6 +37,11 @@ REVISION = re.compile(r"^([0-9a-f]{12}|local)$")
 USAGE_KEYS = ("NSMicrophoneUsageDescription", "NSCameraUsageDescription", "NSLocalNetworkUsageDescription")
 NOTICES = ("NOTICE", "LICENSE", "ios-notices.txt", "webrtc-notice.txt")
 BONJOUR_SERVICE = "_micdrop._tcp"
+REQUIRED_PRIVACY_CATEGORIES = {
+    "NSPrivacyAccessedAPICategoryUserDefaults",
+    "NSPrivacyAccessedAPICategorySystemBootTime",
+    "NSPrivacyAccessedAPICategoryFileTimestamp",
+}
 
 
 def dotted(text):
@@ -154,6 +159,30 @@ def require_equal(info, key, expected, path="Info.plist"):
         raise ValueError(f"{path} {key} is {actual!r}; expected {expected!r}")
 
 
+def check_privacy_manifest(privacy, path):
+    if not isinstance(privacy.get("NSPrivacyTracking"), bool) or privacy.get("NSPrivacyTracking") is not False:
+        raise ValueError(f"{path} NSPrivacyTracking must be false")
+    if privacy.get("NSPrivacyTrackingDomains") != []:
+        raise ValueError(f"{path} NSPrivacyTrackingDomains must be empty")
+    if privacy.get("NSPrivacyCollectedDataTypes") != []:
+        raise ValueError(f"{path} NSPrivacyCollectedDataTypes must be empty")
+    accessed = privacy.get("NSPrivacyAccessedAPITypes")
+    if not isinstance(accessed, list):
+        raise ValueError(f"{path} NSPrivacyAccessedAPITypes must be an array")
+    categories = set()
+    for item in accessed:
+        if not isinstance(item, dict):
+            raise ValueError(f"{path} NSPrivacyAccessedAPITypes entry must be a dictionary")
+        cat = item.get("NSPrivacyAccessedAPIType")
+        reasons = item.get("NSPrivacyAccessedAPITypeReasons")
+        if not isinstance(cat, str) or not isinstance(reasons, list) or not reasons:
+            raise ValueError(f"{path} NSPrivacyAccessedAPITypes entry is incomplete")
+        categories.add(cat)
+    missing = REQUIRED_PRIVACY_CATEGORIES - categories
+    if missing:
+        raise ValueError(f"{path} is missing required API category {sorted(missing)[0]}")
+
+
 def check_info(info, entries, app, bundle_id, minimum_os, revision,
                marketing_version=None, build_number=None, version_name=None):
     require_equal(info, "CFBundleIdentifier", bundle_id)
@@ -163,6 +192,18 @@ def check_info(info, entries, app, bundle_id, minimum_os, revision,
         require_equal(info, "CFBundleShortVersionString", marketing_version)
     if build_number is not None:
         require_equal(info, "CFBundleVersion", build_number)
+    exempt = info.get("ITSAppUsesNonExemptEncryption")
+    if not isinstance(exempt, bool) or exempt is not False:
+        raise ValueError("Info.plist ITSAppUsesNonExemptEncryption must be false")
+    icons = info.get("CFBundleIcons")
+    primary_icon = icons.get("CFBundlePrimaryIcon") if isinstance(icons, dict) else None
+    icon_files = primary_icon.get("CFBundleIconFiles") if isinstance(primary_icon, dict) else None
+    icon_name = primary_icon.get("CFBundleIconName") if isinstance(primary_icon, dict) else None
+    if not isinstance(primary_icon, dict) or (
+        icon_name != "AppIcon"
+        and not (isinstance(icon_files, list) and any(isinstance(f, str) and f.strip() for f in icon_files))
+    ):
+        raise ValueError("Info.plist is missing compiled AppIcon metadata (CFBundleIcons)")
     executable = info.get("CFBundleExecutable")
     if not isinstance(executable, str) or not executable or "/" in executable or executable in (".", ".."):
         raise ValueError(f"Info.plist CFBundleExecutable is {executable!r}; expected the executable's file name")
@@ -195,15 +236,22 @@ def check_info(info, entries, app, bundle_id, minimum_os, revision,
 
 
 def check_ipa(path, bundle_id, minimum_os, revision=None, *,
-              marketing_version=None, build_number=None, version_name=None):
+              marketing_version=None, build_number=None, version_name=None, signed=False):
     """Raise ValueError for the first violated contract; return the IPA's SHA-256."""
     minimum = dotted(minimum_os)
+    allowed_roots = {"Payload", "Symbols", "SwiftSupport"} if signed else {"Payload"}
     with zipfile.ZipFile(path) as package:
         items = package.infolist()
         for item in items:
             name = item.filename
             parts = PurePosixPath(name).parts
-            if name.startswith("/") or ".." in parts or "\\" in name or not name.startswith("Payload/"):
+            if (
+                name.startswith("/")
+                or ".." in parts
+                or "\\" in name
+                or not parts
+                or parts[0] not in allowed_roots
+            ):
                 raise ValueError(f"IPA entry is unsafe: {name}")
         for item in items:
             if (item.external_attr >> 16) & 0o170000 == 0o120000:
@@ -213,14 +261,29 @@ def check_ipa(path, bundle_id, minimum_os, revision=None, *,
         corrupt = package.testzip()
         if corrupt is not None:
             raise ValueError(f"IPA entry is corrupt: {corrupt}")
-        tops = {PurePosixPath(item.filename).parts[1] for item in items if len(PurePosixPath(item.filename).parts) > 1}
+        tops = {
+            PurePosixPath(item.filename).parts[1]
+            for item in items
+            if len(PurePosixPath(item.filename).parts) > 1 and PurePosixPath(item.filename).parts[0] == "Payload"
+        }
         if len(tops) != 1 or not next(iter(tops)).endswith(".app") or next(iter(tops)) == ".app":
             raise ValueError("IPA must contain exactly one Payload/*.app bundle")
         app = "Payload/" + next(iter(tops))
-        for item in items:
-            if "/_CodeSignature/" in item.filename or item.filename.endswith("embedded.mobileprovision"):
-                raise ValueError(f"IPA must be unsigned; found {item.filename}")
-        entries = {item.filename for item in items if not item.is_dir()}
+        entries = {item.filename: item for item in items if not item.is_dir()}
+        if not signed:
+            for item in items:
+                if "/_CodeSignature/" in item.filename or item.filename.endswith("embedded.mobileprovision"):
+                    raise ValueError(f"IPA must be unsigned; found {item.filename}")
+        else:
+            required_sig_files = (
+                f"{app}/_CodeSignature/CodeResources",
+                f"{app}/Frameworks/WebRTC.framework/_CodeSignature/CodeResources",
+                f"{app}/embedded.mobileprovision",
+            )
+            for sig_path in required_sig_files:
+                if sig_path not in entries or entries[sig_path].file_size == 0:
+                    raise ValueError(f"Signed IPA is missing non-empty {sig_path}")
+
         info_path = f"{app}/Info.plist"
         if info_path not in entries:
             raise ValueError(f"IPA is missing {info_path}")
@@ -228,6 +291,15 @@ def check_ipa(path, bundle_id, minimum_os, revision=None, *,
         executable = check_info(
             info, entries, app, bundle_id, minimum_os, revision,
             marketing_version=marketing_version, build_number=build_number, version_name=version_name)
+
+        assets_car = f"{app}/Assets.car"
+        if assets_car not in entries or entries[assets_car].file_size == 0:
+            raise ValueError(f"IPA is missing compiled asset catalog {assets_car}")
+
+        privacy_path = f"{app}/PrivacyInfo.xcprivacy"
+        if privacy_path not in entries:
+            raise ValueError(f"IPA is missing {privacy_path}")
+        check_privacy_manifest(read_info(package, privacy_path), privacy_path)
 
         main_path = f"{app}/{executable}"
         _, main_minimum, dylibs, rpaths = arm64_macho(package.read(main_path), main_path, MH_EXECUTE, "executable")
@@ -278,9 +350,17 @@ if __name__ == "__main__":
     parser.add_argument("--bundle-id", required=True)
     parser.add_argument("--minimum-os", required=True)
     parser.add_argument("--revision")
+    parser.add_argument("--signed", action="store_true", help="Verify an App Store Connect signed IPA")
     arguments = parser.parse_args()
     try:
-        sha256 = check_ipa(arguments.ipa, arguments.bundle_id, arguments.minimum_os, arguments.revision)
+        sha256 = check_ipa(
+            arguments.ipa,
+            arguments.bundle_id,
+            arguments.minimum_os,
+            arguments.revision,
+            signed=arguments.signed,
+        )
     except (ValueError, zipfile.BadZipFile, OSError) as error:
         parser.exit(1, f"iPhone bundle check failed: {error}\n")
-    print(f"Verified unsigned iPhone IPA {sha256}")
+    label = "signed" if arguments.signed else "unsigned"
+    print(f"Verified {label} iPhone IPA {sha256}")

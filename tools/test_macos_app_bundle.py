@@ -75,18 +75,30 @@ class MacOSAppBundleTests(unittest.TestCase):
 
     def test_build_check_and_deterministic_zip_succeed(self):
         app = self.build_valid()
+        # Simulate codesign seal + xcrun stapler notarization ticket before zipping.
+        code_sig = app / "Contents" / "_CodeSignature"
+        code_sig.mkdir(parents=True, exist_ok=True)
+        (code_sig / "CodeResources").write_bytes(b"<plist><dict/></plist>")
+        (app / "Contents" / "CodeResources").write_bytes(b"stapled-ticket-bytes")
+
         bundle.check_app_directory(app, revision="abcdef012345")
         digest1 = bundle.zip_app_bundle(app, self.zip_out, revision="abcdef012345")
         second_zip = self.base / "dist" / "second.zip"
         digest2 = bundle.zip_app_bundle(app, second_zip, revision="abcdef012345")
         self.assertEqual(digest1, digest2)
 
+        with zipfile.ZipFile(self.zip_out) as zf:
+            names = set(zf.namelist())
+            self.assertIn("MicDrop.app/Contents/Resources/AppIcon.icns", names)
+            self.assertIn("MicDrop.app/Contents/CodeResources", names)
+            self.assertIn("MicDrop.app/Contents/_CodeSignature/CodeResources", names)
+
         shared = release_version.read()
         info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
         self.assertEqual(info["CFBundleShortVersionString"], shared["version"].split("-", 1)[0])
         self.assertEqual(info["CFBundleVersion"], str(shared["android_version_code"]))
         self.assertEqual(info["MicDropVersionName"], shared["version"])
-        self.assertNotIn("CFBundleIconFile", info)
+        self.assertEqual(info["CFBundleIconFile"], "AppIcon")
 
     def test_rejects_wrong_architecture_or_higher_deployment_target(self):
         x86_64 = 0x01000007
@@ -103,24 +115,31 @@ class MacOSAppBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds 14.2"):
             self.build_valid()
 
-    def test_rejects_missing_privacy_keys_or_custom_icon_or_missing_notice(self):
+    def test_rejects_missing_privacy_keys_or_bad_icon_or_missing_notice(self):
         app = self.build_valid()
         info_path = app / "Contents" / "Info.plist"
         original = plistlib.loads(info_path.read_bytes())
 
-        for key in ("NSAudioCaptureUsageDescription", "NSLocalNetworkUsageDescription", "NSBonjourServices"):
+        for key in ("NSAudioCaptureUsageDescription", "NSLocalNetworkUsageDescription", "NSBonjourServices", "CFBundleIconFile"):
             mutated = dict(original)
             mutated.pop(key)
             info_path.write_bytes(plistlib.dumps(mutated))
             with self.subTest(missing=key), self.assertRaises(ValueError):
                 bundle.check_app_directory(app)
 
-        with_icon = dict(original, CFBundleIconFile="AppIcon.icns")
-        info_path.write_bytes(plistlib.dumps(with_icon))
-        with self.assertRaisesRegex(ValueError, "custom icon"):
+        with_icon_name = dict(original, CFBundleIconName="AppIcon")
+        info_path.write_bytes(plistlib.dumps(with_icon_name))
+        with self.assertRaisesRegex(ValueError, "CFBundleIconName"):
             bundle.check_app_directory(app)
 
         info_path.write_bytes(plistlib.dumps(original))
+        icns_file = app / "Contents" / "Resources" / "AppIcon.icns"
+        good_icns = icns_file.read_bytes()
+        icns_file.write_bytes(b"not-an-icns-file-at-all")
+        with self.assertRaisesRegex(ValueError, "AppIcon.icns"):
+            bundle.check_app_directory(app)
+        icns_file.write_bytes(good_icns)
+
         (app / "Contents" / "Resources" / "WEBRTC-NOTICE.txt").unlink()
         with self.assertRaisesRegex(ValueError, "WEBRTC-NOTICE.txt"):
             bundle.check_app_directory(app)

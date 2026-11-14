@@ -20,6 +20,8 @@
   <string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key>
   <string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
   <key>LSRequiresIPhoneOS</key>
   <true/>
   <key>MicDropRevision</key>
@@ -31,11 +33,11 @@
     <string>_micdrop._tcp</string>
   </array>
   <key>NSCameraUsageDescription</key>
-  <string>MicDrop uses the camera only to scan the Windows pairing QR code.</string>
+  <string>MicDrop uses the camera only to scan the desktop pairing QR code.</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>MicDrop finds and connects to your paired Windows computer on this network.</string>
+  <string>MicDrop finds and connects to your paired computer on this network.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>MicDrop sends your iPhone microphone to your paired Windows PC only after you turn on Send microphone and tap Connect.</string>
+  <string>MicDrop sends your iPhone microphone to your paired computer only after you turn on Send microphone and tap Connect.</string>
   <key>UIApplicationSceneManifest</key>
   <dict>
     <key>UIApplicationSupportsMultipleScenes</key>

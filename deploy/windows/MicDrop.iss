@@ -55,7 +55,27 @@ AppId={#ProductId}
 AppName={#ProductName}
 AppVersion={#AppVersion}
 AppVerName={#ProductName} {#AppVersion} ({#BuildRevision})
+#ifdef SignInstaller
+  #ifdef InstallerTest
+    #error SignInstaller cannot be combined with InstallerTest
+  #endif
+  #ifndef PublisherName
+    #error PublisherName is required for SignInstaller
+  #endif
+  #ifndef SignedUninstallerDir
+    #error SignedUninstallerDir is required for SignInstaller
+  #endif
+AppPublisher={#PublisherName}
+AppComments=Microphone return requires a separately installed virtual audio cable.
+SignTool=micdrop
+SignedUninstaller=yes
+SignedUninstallerDir={#SignedUninstallerDir}
+VersionInfoCompany={#PublisherName}
+VersionInfoDescription=MicDrop installer
+#else
 AppComments=Development build. Microphone return requires a separately installed virtual audio cable.
+VersionInfoDescription=MicDrop development installer
+#endif
 DefaultDirName={#InstallDirectory}
 DefaultGroupName={#ProductName}
 DisableDirPage=yes
@@ -91,7 +111,6 @@ SolidCompression=yes
 OutputDir={#OutputDir}
 OutputBaseFilename=MicDrop-{#AppVersion}-{#BuildRevision}-windows-x64-setup
 VersionInfoVersion={#NumericVersion}
-VersionInfoDescription=MicDrop development installer
 VersionInfoProductTextVersion={#AppVersion} ({#BuildRevision})
 
 [Tasks]

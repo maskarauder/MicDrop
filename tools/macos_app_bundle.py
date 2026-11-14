@@ -43,7 +43,7 @@ FAT_HEADER = struct.Struct(">II")
 FAT_ARCH = struct.Struct(">iiIII")
 FAT_ARCH_64 = struct.Struct(">iiQQII")
 
-REQUIRED_RESOURCES = (
+REQUIRED_NOTICES = (
     "LICENSE",
     "NOTICE",
     "QR-CODE-NOTICE.txt",
@@ -52,6 +52,13 @@ REQUIRED_RESOURCES = (
     "WEBRTC-NOTICE.txt",
     "WEBRTC-VERSIONS.txt",
 )
+
+REQUIRED_APP_RESOURCES = (
+    "AppIcon.icns",
+    *REQUIRED_NOTICES,
+)
+
+REQUIRED_RESOURCES = REQUIRED_APP_RESOURCES
 
 USAGE_KEYS = (
     "NSAudioCaptureUsageDescription",
@@ -116,6 +123,7 @@ def make_info_plist(identity, bundle_id=DEFAULT_BUNDLE_ID, minimum_os=DEFAULT_MI
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": "MicDrop",
         "CFBundleExecutable": "MicDrop",
+        "CFBundleIconFile": "AppIcon",
         "CFBundleIdentifier": bundle_id,
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "MicDrop",
@@ -137,6 +145,14 @@ def make_info_plist(identity, bundle_id=DEFAULT_BUNDLE_ID, minimum_os=DEFAULT_MI
         ),
         "NSSupportsAutomaticGraphicsSwitching": True,
     }
+
+
+def _check_icns_bytes(data, label):
+    if len(data) < 16 or data[:4] != b"icns":
+        raise ValueError(f"{label}: expected a valid Apple .icns icon container")
+    total_len = struct.unpack_from(">I", data, 4)[0]
+    if total_len != len(data):
+        raise ValueError(f"{label}: malformed .icns container length")
 
 
 def arm64_slice(data, label):
@@ -216,6 +232,7 @@ def build_app_bundle(
     output_app,
     *,
     root=release_version.ROOT,
+    icon_icns=None,
     bundle_id=DEFAULT_BUNDLE_ID,
     minimum_os=DEFAULT_MIN_MACOS,
     revision=None,
@@ -247,7 +264,13 @@ def build_app_bundle(
     copy_regular_file(executable, macos_dir / "MicDrop", 0o755)
     copy_regular_file(rtc_dylib, frameworks_dir / "libmicdrop_rtc.dylib", 0o755)
 
+    resolved_icon = (
+        Path(icon_icns)
+        if icon_icns is not None
+        else (root / "apps" / "windows-host" / "resources" / "AppIcon.icns")
+    )
     notice_sources = {
+        "AppIcon.icns": resolved_icon,
         "LICENSE": root / "LICENSE",
         "NOTICE": root / "NOTICE",
         "QR-CODE-NOTICE.txt": root / "third_party" / "QR-CODE-NOTICE.txt",
@@ -277,6 +300,7 @@ def _validate_info_dict(info, *, expected_identity, bundle_id, minimum_os, revis
         "CFBundleIdentifier": bundle_id,
         "CFBundlePackageType": "APPL",
         "CFBundleExecutable": "MicDrop",
+        "CFBundleIconFile": "AppIcon",
         "LSMinimumSystemVersion": minimum_os,
         "CFBundleShortVersionString": expected_identity["marketing_version"],
         "CFBundleVersion": expected_identity["build_number"],
@@ -286,8 +310,8 @@ def _validate_info_dict(info, *, expected_identity, bundle_id, minimum_os, revis
         actual = info.get(key)
         if actual != expected:
             raise ValueError(f"Info.plist {key} is {actual!r}; expected {expected!r}")
-    if "CFBundleIconFile" in info or "CFBundleIconName" in info:
-        raise ValueError("Info.plist must not reference custom icon artwork without explicit approval")
+    if "CFBundleIconName" in info:
+        raise ValueError("Info.plist must use CFBundleIconFile='AppIcon', not CFBundleIconName")
     actual_rev = info.get("MicDropRevision")
     if not isinstance(actual_rev, str) or not REVISION_RE.match(actual_rev):
         raise ValueError(f"Info.plist MicDropRevision {actual_rev!r} is invalid")
@@ -376,10 +400,14 @@ def check_app_directory(
             f"Contents/Frameworks/libmicdrop_rtc.dylib minimum macOS {version_text(dylib_min)} exceeds {minimum_os}"
         )
 
-    for resource in REQUIRED_RESOURCES:
+    for resource in REQUIRED_APP_RESOURCES:
         res_path = app_dir / "Contents" / "Resources" / resource
         if not res_path.is_file() or res_path.stat().st_size == 0:
             raise ValueError(f"MicDrop.app is missing non-empty Contents/Resources/{resource}")
+    _check_icns_bytes(
+        (app_dir / "Contents" / "Resources" / "AppIcon.icns").read_bytes(),
+        "Contents/Resources/AppIcon.icns",
+    )
 
 
 def check_app_zip(
@@ -461,10 +489,14 @@ def check_app_zip(
                 f"{dylib_name} minimum macOS {version_text(dylib_min)} exceeds {minimum_os}"
             )
 
-        for resource in REQUIRED_RESOURCES:
+        for resource in REQUIRED_APP_RESOURCES:
             res_name = f"MicDrop.app/Contents/Resources/{resource}"
             if res_name not in by_name or by_name[res_name].file_size == 0:
                 raise ValueError(f"Archive is missing non-empty {res_name}")
+        _check_icns_bytes(
+            archive.read("MicDrop.app/Contents/Resources/AppIcon.icns"),
+            "MicDrop.app/Contents/Resources/AppIcon.icns",
+        )
 
     with zip_path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -533,6 +565,7 @@ def main(argv=None):
     build_cmd.add_argument("--webrtc-notice", required=True, type=Path)
     build_cmd.add_argument("--webrtc-versions", required=True, type=Path)
     build_cmd.add_argument("--output-app", required=True, type=Path)
+    build_cmd.add_argument("--icon-icns", type=Path)
     build_cmd.add_argument("--bundle-id", default=DEFAULT_BUNDLE_ID)
     build_cmd.add_argument("--minimum-os", default=DEFAULT_MIN_MACOS)
     build_cmd.add_argument("--revision")
@@ -558,6 +591,7 @@ def main(argv=None):
             args.webrtc_notice,
             args.webrtc_versions,
             args.output_app,
+            icon_icns=args.icon_icns,
             bundle_id=args.bundle_id,
             minimum_os=args.minimum_os,
             revision=args.revision,

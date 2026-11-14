@@ -1,11 +1,14 @@
 import base64
 import copy
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zipfile
 
 import draft_release as release
@@ -37,6 +40,54 @@ RUN = {"id": 42, "run_attempt": 1, "head_sha": SHA, "status": "completed", "conc
 NOTES = "Development preview."
 
 
+def build_manifest_bytes(platform, *, win_signed=False, mac_notarized=False, mac_dev_id=False, overrides=None):
+    payload = {
+        "schema": 1,
+        **IDENTITY,
+        "source_sha": SHA,
+        "build_run_id": str(RUN["id"]),
+        "build_attempt": str(RUN["run_attempt"]),
+    }
+    if platform == "windows":
+        payload["authenticode_signed"] = win_signed
+        payload["signing"] = (
+            "Authenticode-signed and timestamped Windows x64 installer and portable payload"
+            if win_signed
+            else "unsigned Windows development packages"
+        )
+        if win_signed:
+            payload["signer_subject"] = "CN=Noah Seymour, O=Noah Seymour, C=US"
+            payload["certificate_sha256"] = "d" * 64
+    elif platform == "linux":
+        payload["signing"] = "unsigned Linux x64 CLI and GTK3 desktop bundle"
+    elif platform == "macos":
+        payload["bundle_id"] = "com.maskarauder.micdrop.mac"
+        payload["developer_id_signed"] = bool(mac_notarized or mac_dev_id)
+        payload["notarized"] = mac_notarized
+        if mac_notarized:
+            payload["signing"] = "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"
+            payload["signer_authority"] = "Developer ID Application: Noah Seymour (ABCDE12345)"
+            payload["team_id"] = "ABCDE12345"
+        elif mac_dev_id:
+            payload["signing"] = "Developer ID signed macOS arm64 app bundle and CLI host (not notarized)"
+            payload["signer_authority"] = "Developer ID Application: Noah Seymour (ABCDE12345)"
+            payload["team_id"] = "ABCDE12345"
+        else:
+            payload["signing"] = "ad-hoc signed macOS arm64 app bundle and CLI host"
+    elif platform == "android":
+        payload["application_id"] = "com.maskarauder.micdrop.dev"
+        payload["signing"] = "development keystore"
+        payload["certificate_sha256"] = "c" * 64
+    elif platform == "ios":
+        payload["bundle_id"] = "com.maskarauder.micdrop"
+        payload["signing"] = "unsigned development archive for user sideloading"
+    else:
+        raise ValueError(f"Unknown test platform: {platform}")
+    if overrides:
+        payload.update(overrides)
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 class FakeGitHub:
     repository = "test/MicDrop"
 
@@ -44,11 +95,25 @@ class FakeGitHub:
         self.run = copy.deepcopy(RUN)
         self.release = None
         self.assets = []
+        self._asset_blobs = {}
+        self._next_asset_id = 100
         self.writes = []
         self.tag = None
 
     def listing(self, path):
         return ([copy.deepcopy(self.release)] if self.release else []) if path == "/releases" else copy.deepcopy(self.assets)
+
+    def asset_bytes(self, asset, *, max_bytes=262144):
+        asset_id = asset.get("id")
+        if not isinstance(asset_id, int) or asset_id not in self._asset_blobs:
+            raise ValueError(f"Missing release asset id: {asset.get('name')}")
+        raw = self._asset_blobs[asset_id]
+        if len(raw) > max_bytes:
+            raise ValueError(f"Release asset exceeds size limit: {asset.get('name')}")
+        actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if asset.get("state") != "uploaded" or len(raw) != asset.get("size") or actual_digest != asset.get("digest"):
+            raise ValueError(f"Downloaded release asset failed SHA-256 verification: {asset.get('name')}")
+        return raw
 
     def request(self, method, path, data=None, file=None):
         if method == "GET":
@@ -67,7 +132,17 @@ class FakeGitHub:
             self.release = {"id": 7, "upload_url": "https://uploads.github.com/repos/test/MicDrop/releases/7/assets{?name,label}", **data}
             return copy.deepcopy(self.release)
         if file:
-            asset = {"name": file.name, "state": "uploaded", "digest": "sha256:" + release.digest(file), "size": file.stat().st_size}
+            raw = file.read_bytes()
+            asset_id = self._next_asset_id
+            self._next_asset_id += 1
+            asset = {
+                "id": asset_id,
+                "name": file.name,
+                "state": "uploaded",
+                "digest": "sha256:" + release.digest(file),
+                "size": len(raw),
+            }
+            self._asset_blobs[asset_id] = raw
             self.assets.append(asset)
             return asset
         if method == "PATCH":
@@ -109,6 +184,12 @@ class DraftReleaseTests(unittest.TestCase):
                 "app_version": IDENTITY["version"], "build_revision": SHA, "files": entries})})
 
     def windows_command(self, args):
+        if args[0] == "pwsh":
+            return json.dumps([
+                {"file": "MicDrop.exe", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+                {"file": "micdrop_rtc.dll", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+                {"file": "MicDrop-0.1.0-beta.1-windows-x64-setup.exe", "status": "NotSigned", "status_message": "", "subject": "", "issuer": "", "sha256": "", "timestamped": False},
+            ])
         return json.dumps({**IDENTITY, "revision": SHA, "modified": False, "platform": "windows/amd64"})
 
     def test_portable_and_installer_share_verified_curated_payload(self):
@@ -116,10 +197,49 @@ class DraftReleaseTests(unittest.TestCase):
         first = release.stage("windows", self.artifacts, self.root / "out1", 42, 1, SHA, IDENTITY, self.windows_command)
         second = release.stage("windows", self.artifacts, self.root / "out2", 42, 1, SHA, IDENTITY, self.windows_command)
         self.assertEqual([release.digest(p) for p in first], [release.digest(p) for p in second])
+        self.assertEqual(json.loads(first[-1].read_text())["signing"], "unsigned Windows development packages")
         with zipfile.ZipFile(first[1]) as archive:
             self.assertEqual(set(archive.namelist()), {"MicDrop.exe", "micdrop_rtc.dll", "README.md", "BETA_TESTING.md",
                 "LICENSE", "NOTICE", "WEBRTC-NOTICE.txt", "WEBRTC-VERSIONS.txt",
                 "QR-CODE-NOTICE.txt", "DISCOVERY-NOTICES.txt", "WEBSOCKET-NOTICE.txt"})
+
+    def test_windows_authenticode_signatures_are_inspected(self):
+        self.windows()
+        base_records = [
+            {
+                "file": name,
+                "status": "Valid",
+                "status_message": "Signature verified.",
+                "subject": "CN=Noah Seymour, O=Noah Seymour, C=US",
+                "issuer": "CN=Microsoft ID Verified CS EOC CA 01",
+                "sha256": "d" * 64,
+                "timestamped": True,
+            }
+            for name in ("MicDrop.exe", "micdrop_rtc.dll", "MicDrop-0.1.0-beta.1-windows-x64-setup.exe")
+        ]
+
+        def make_cmd(records):
+            def _cmd(args):
+                if args[0] == "pwsh":
+                    return json.dumps(records)
+                return self.windows_command(args)
+            return _cmd
+
+        signed = release.stage("windows", self.artifacts, self.root / "win-signed", 42, 1, SHA, IDENTITY, make_cmd(base_records))
+        meta = json.loads(signed[-1].read_text())
+        self.assertEqual(meta["signing"], "Authenticode-signed and timestamped Windows x64 installer and portable payload")
+        self.assertEqual(meta["signer_subject"], "CN=Noah Seymour, O=Noah Seymour, C=US")
+        self.assertEqual(meta["certificate_sha256"], "d" * 64)
+
+        bad_cases = [
+            ("mixed", [{**base_records[0], "status": "NotSigned"}, base_records[1], base_records[2]], "Inconsistent Windows Authenticode"),
+            ("invalid", [base_records[0], {**base_records[1], "status": "HashMismatch"}, base_records[2]], "Invalid Windows Authenticode"),
+            ("untimestamped", [base_records[0], base_records[1], {**base_records[2], "timestamped": False}], "missing an RFC 3161 timestamp"),
+            ("mismatched_subject", [base_records[0], base_records[1], {**base_records[2], "subject": "CN=Other"}], "Mismatched Windows Authenticode"),
+        ]
+        for label, records, pattern in bad_cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, pattern):
+                release.stage("windows", self.artifacts, self.root / f"win-bad-{label}", 42, 1, SHA, IDENTITY, make_cmd(records))
 
     def assert_invalid_windows_manifest(self, change):
         self.windows(change)
@@ -218,7 +338,7 @@ class DraftReleaseTests(unittest.TestCase):
             "MicDrop-0.1.0-beta.1-ios-build.json",
         ])
         metadata = json.loads(paths[-1].read_text())
-        self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop.dev")
+        self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop")
         self.assertEqual(metadata["minimum_os"], "17.0")
         for overrides in (
             {"CFBundleShortVersionString": "0.2.0"},
@@ -371,13 +491,24 @@ class DraftReleaseTests(unittest.TestCase):
             lib.write_bytes(test_macos_app_bundle.make_macho(macos_app_bundle.MH_DYLIB))
         exe.chmod(0o755)
         lib.chmod(0o755)
-        for notice in package_unix_host.REQUIRED_NOTICES:
+        for notice in test_package_unix_host.CLI_HOST_NOTICES:
             (stage_dir / notice).write_text(f"{notice}\n", encoding="utf-8")
         out_tar = self.root / f"MicDrop-{platform}-host.tar.gz"
         package_unix_host.package_host_tarball(stage_dir, out_tar, platform=platform)
         return out_tar.read_bytes()
 
-    def make_macos_app_zip(self, *, revision=SHA[:12], identity=IDENTITY):
+    def _suffix_payload(self, suffix, *, win_signed=False, mac_notarized=False, mac_dev_id=False):
+        if suffix.endswith("-build.json"):
+            platform = suffix[1 : -len("-build.json")]
+            return build_manifest_bytes(
+                platform,
+                win_signed=win_signed,
+                mac_notarized=mac_notarized,
+                mac_dev_id=mac_dev_id,
+            )
+        return suffix.encode("utf-8")
+
+    def make_macos_app_zip(self, *, revision=SHA[:12], identity=IDENTITY, stapled=False):
         src_dir = self.root / "macos-src"
         src_dir.mkdir(exist_ok=True)
         exe = src_dir / "MicDrop"
@@ -394,6 +525,8 @@ class DraftReleaseTests(unittest.TestCase):
             exe, dylib, notice, versions, app_out,
             revision=revision, shared_identity=identity,
         )
+        if stapled:
+            (app_out / "Contents" / "CodeResources").write_bytes(b"stapled-ticket")
         macos_app_bundle.zip_app_bundle(
             app_out, zip_out,
             revision=revision, shared_identity=identity,
@@ -420,55 +553,199 @@ class DraftReleaseTests(unittest.TestCase):
             release.stage("linux", self.artifacts, self.root / "linux-bad-rev", 42, 1, SHA, IDENTITY,
                           lambda args: json.dumps({**IDENTITY, "revision": "b" * 40, "modified": False, "platform": "linux/amd64"}))
 
+    def _replace_retained_macos_app(self, **zip_kwargs):
+        for folder in (self.artifacts / "macos-arm64-app", self.workspace / "macos-arm64-app"):
+            if folder.exists():
+                for child in sorted(folder.rglob("*"), reverse=True):
+                    child.unlink() if child.is_file() else child.rmdir()
+                folder.rmdir()
+        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip(**zip_kwargs)})
+
+    def test_run_command_returns_stderr_only_when_stdout_is_empty(self):
+        import sys
+
+        stderr_only = release.run_command(
+            [sys.executable, "-c", "import sys; sys.stderr.write('Signature=adhoc\\nTeamIdentifier=not set\\n')"]
+        )
+        self.assertEqual(stderr_only, "Signature=adhoc\nTeamIdentifier=not set\n")
+        both = release.run_command(
+            [sys.executable, "-c", "import sys; sys.stdout.write('{\"ok\":true}'); sys.stderr.write('warning\\n')"]
+        )
+        self.assertEqual(both, '{"ok":true}')
+
     def test_macos_app_and_cli_host_are_inspected(self):
-        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip()})
+        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip(stapled=True)})
         self.retain("macos-arm64-host", {"MicDrop-macos-arm64-host.tar.gz": self.make_unix_tarball("macos-arm64")})
-        codesign_targets = []
 
-        def macos_command(args):
-            if args[0] == "codesign":
-                codesign_targets.append([Path(a).name for a in args[1:] if not str(a).startswith("-")])
-                for target in args[1:]:
-                    if not str(target).startswith("-"):
-                        self.assertTrue(Path(target).exists(), target)
-                return ""
-            exe_path = Path(args[0])
-            self.assertTrue(exe_path.is_file())
-            return json.dumps({**IDENTITY, "revision": SHA, "modified": False, "platform": "darwin/arm64"})
+        dev_id_details = (
+            "Executable=/tmp/MicDrop\n"
+            "CodeDirectory v=20500 size=1024 flags=0x10000(runtime) hashes=10+5 location=embedded\n"
+            "Authority=Developer ID Application: Noah Seymour (ABCDE12345)\n"
+            "Authority=Developer ID Certification Authority\n"
+            "Authority=Apple Root CA\n"
+            "Timestamp=Nov 13, 2026 at 3:40:12 PM\n"
+            "TeamIdentifier=ABCDE12345\n"
+        )
+        adhoc_details = (
+            "Executable=/tmp/MicDrop\n"
+            "CodeDirectory v=20400 size=1024 flags=0x2(adhoc) hashes=10+3 location=embedded\n"
+            "Signature=adhoc\n"
+            "TeamIdentifier=not set\n"
+        )
 
-        paths = release.stage("macos", self.artifacts, self.root / "macos-good", 42, 1, SHA, IDENTITY, macos_command)
+        def make_macos_cmd(details_for_target, *, embed_modified=False, verify_log=None, stapler_log=None):
+            def _cmd(args):
+                if args[0] == "codesign" and "--verify" in args:
+                    targets = [Path(a) for a in args[1:] if not str(a).startswith("-")]
+                    for target in targets:
+                        self.assertTrue(target.exists(), target)
+                    if verify_log is not None:
+                        verify_log.append([t.name for t in targets])
+                    return ""
+                if args[:3] == ["codesign", "-dv", "--verbose=4"]:
+                    target = Path(args[3])
+                    self.assertTrue(target.exists(), target)
+                    return details_for_target(target) if callable(details_for_target) else details_for_target
+                if args[:3] == ["xcrun", "stapler", "validate"]:
+                    if stapler_log is not None:
+                        stapler_log.append(Path(args[3]).name)
+                    return ""
+                exe_path = Path(args[0])
+                self.assertTrue(exe_path.is_file())
+                return json.dumps({**IDENTITY, "revision": SHA, "modified": embed_modified, "platform": "darwin/arm64"})
+
+            return _cmd
+
+        # 1. Developer ID signed + stapled notarization ticket.
+        verify_targets = []
+        stapler_targets = []
+        paths = release.stage(
+            "macos", self.artifacts, self.root / "macos-good", 42, 1, SHA, IDENTITY,
+            make_macos_cmd(dev_id_details, verify_log=verify_targets, stapler_log=stapler_targets),
+        )
         self.assertEqual([p.name for p in paths], [
             "MicDrop-0.1.0-beta.1-macos-arm64-app.zip",
             "MicDrop-0.1.0-beta.1-macos-arm64-host.tar.gz",
             "MicDrop-0.1.0-beta.1-macos-build.json",
         ])
-        self.assertEqual(codesign_targets, [["MicDrop.app"], ["libmicdrop_rtc.dylib", "micdrop-host"]])
+        self.assertEqual(verify_targets, [["MicDrop.app"], ["libmicdrop_rtc.dylib", "micdrop-host"]])
+        self.assertEqual(stapler_targets, ["MicDrop.app"])
         metadata = json.loads(paths[-1].read_text())
         self.assertEqual(metadata["bundle_id"], "com.maskarauder.micdrop.mac")
         self.assertEqual(metadata["minimum_os"], "14.2")
+        self.assertIs(metadata["developer_id_signed"], True)
+        self.assertIs(metadata["notarized"], True)
+        self.assertEqual(metadata["signer_authority"], "Developer ID Application: Noah Seymour (ABCDE12345)")
+        self.assertEqual(metadata["team_id"], "ABCDE12345")
+        self.assertEqual(
+            metadata["signing"],
+            "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host",
+        )
+
+        # Ad-hoc signed bundle with a stapled ticket is impossible and must be rejected.
+        with self.assertRaisesRegex(ValueError, "cannot carry a stapled notarization ticket"):
+            release.stage(
+                "macos", self.artifacts, self.root / "macos-adhoc-stapled", 42, 1, SHA, IDENTITY,
+                make_macos_cmd(adhoc_details),
+            )
+
+        # 2. Developer ID signed WITHOUT notarization (unstapled) must NOT be labeled ad-hoc.
+        self._replace_retained_macos_app(stapled=False)
+        unstapled_stapler_calls = []
+        dev_only_paths = release.stage(
+            "macos", self.artifacts, self.root / "macos-dev-id-unnotarized", 42, 1, SHA, IDENTITY,
+            make_macos_cmd(dev_id_details, stapler_log=unstapled_stapler_calls),
+        )
+        self.assertEqual(unstapled_stapler_calls, [])
+        dev_only_meta = json.loads(dev_only_paths[-1].read_text())
+        self.assertIs(dev_only_meta["developer_id_signed"], True)
+        self.assertIs(dev_only_meta["notarized"], False)
+        self.assertEqual(dev_only_meta["signer_authority"], "Developer ID Application: Noah Seymour (ABCDE12345)")
+        self.assertEqual(dev_only_meta["team_id"], "ABCDE12345")
+        self.assertEqual(
+            dev_only_meta["signing"],
+            "Developer ID signed macOS arm64 app bundle and CLI host (not notarized)",
+        )
+        self.assertNotIn("ad-hoc", dev_only_meta["signing"].lower())
+
+        # 3. Ad-hoc signed WITHOUT notarization.
+        adhoc_stapler_calls = []
+        adhoc_paths = release.stage(
+            "macos", self.artifacts, self.root / "macos-adhoc", 42, 1, SHA, IDENTITY,
+            make_macos_cmd(adhoc_details, stapler_log=adhoc_stapler_calls),
+        )
+        self.assertEqual(adhoc_stapler_calls, [])
+        adhoc_meta = json.loads(adhoc_paths[-1].read_text())
+        self.assertIs(adhoc_meta["developer_id_signed"], False)
+        self.assertIs(adhoc_meta["notarized"], False)
+        self.assertNotIn("signer_authority", adhoc_meta)
+        self.assertNotIn("team_id", adhoc_meta)
+        self.assertEqual(adhoc_meta["signing"], "ad-hoc signed macOS arm64 app bundle and CLI host")
+
+        # 4. Invalid or inconsistent macOS signature combinations are rejected.
+        bad_sig_cases = [
+            (
+                "mixed_adhoc_cli",
+                lambda t: adhoc_details if t.name == "micdrop-host" else dev_id_details,
+                "Inconsistent macOS code-signing state",
+            ),
+            (
+                "missing_runtime",
+                dev_id_details.replace("flags=0x10000(runtime)", "flags=0x0(none)"),
+                "missing Hardened Runtime",
+            ),
+            (
+                "missing_timestamp",
+                dev_id_details.replace("Timestamp=Nov 13, 2026 at 3:40:12 PM\n", ""),
+                "missing a secure timestamp",
+            ),
+            (
+                "mismatched_team",
+                lambda t: dev_id_details.replace("TeamIdentifier=ABCDE12345", "TeamIdentifier=ZYXWV98765")
+                if t.name == "micdrop-host"
+                else dev_id_details,
+                "Mismatched Developer ID signer identity",
+            ),
+            (
+                "wrong_cert_type",
+                dev_id_details.replace("Authority=Developer ID Application:", "Authority=Apple Development:"),
+                "Unsupported macOS signing authority",
+            ),
+        ]
+        for label, details_spec, pattern in bad_sig_cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, pattern):
+                release.stage(
+                    "macos", self.artifacts, self.root / f"macos-bad-{label}", 42, 1, SHA, IDENTITY,
+                    make_macos_cmd(details_spec),
+                )
+
         with self.assertRaisesRegex(ValueError, "Embedded macOS build identity mismatch"):
             release.stage(
                 "macos", self.artifacts, self.root / "macos-bad-embed", 42, 1, SHA, IDENTITY,
-                lambda args: "" if args[0] == "codesign" else json.dumps(
-                    {**IDENTITY, "revision": SHA, "modified": True, "platform": "darwin/arm64"}),
+                make_macos_cmd(adhoc_details, embed_modified=True),
             )
         # Also verify Info.plist revision mismatch is rejected before command execution.
-        for folder in (self.artifacts / "macos-arm64-app", self.workspace / "macos-arm64-app"):
-            for child in sorted(folder.rglob("*"), reverse=True):
-                child.unlink() if child.is_file() else child.rmdir()
-            folder.rmdir()
-        self.retain("macos-arm64-app", {"MicDrop-macos-arm64-app.zip": self.make_macos_app_zip(revision="b" * 12)})
+        self._replace_retained_macos_app(revision="b" * 12)
         with self.assertRaisesRegex(ValueError, "MicDropRevision"):
-            release.stage("macos", self.artifacts, self.root / "macos-bad-plist", 42, 1, SHA, IDENTITY, macos_command)
+            release.stage(
+                "macos", self.artifacts, self.root / "macos-bad-plist", 42, 1, SHA, IDENTITY,
+                make_macos_cmd(adhoc_details),
+            )
 
     def test_complete_draft_gets_verified_checksums_but_remains_unpublished(self):
         api = FakeGitHub()
         release.prepare(api, RUN, IDENTITY, NOTES)
+        self.assertIn(
+            "Package signing: pending package verification during draft assembly.",
+            api.release["body"],
+        )
+        self.assertNotIn("Authenticode-signed", api.release["body"])
+        self.assertNotIn("Apple-notarized", api.release["body"])
         for suffix in REQUIRED_SUFFIXES:
             if suffix.startswith("-linux"):
                 continue
             path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
-            path.write_bytes(suffix.encode())
+            path.write_bytes(self._suffix_payload(suffix))
             release.upload(api, 7, RUN, IDENTITY, path)
         with self.assertRaisesRegex(ValueError, "missing or unexpected assets"):
             release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "missing-linux")
@@ -476,12 +753,20 @@ class DraftReleaseTests(unittest.TestCase):
             if not suffix.startswith("-linux"):
                 continue
             path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
-            path.write_bytes(suffix.encode())
+            path.write_bytes(self._suffix_payload(suffix))
             release.upload(api, 7, RUN, IDENTITY, path)
         release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "done")
         self.assertTrue(api.release["draft"])
         self.assertEqual(api.release["tag_name"], "v" + IDENTITY["version"])
         self.assertNotIn("INCOMPLETE", api.release["body"])
+        # Unsigned Windows + ad-hoc macOS builds must NEVER claim Authenticode signing or Apple notarization.
+        self.assertIn("Windows x64 packages are unsigned", api.release["body"])
+        self.assertIn(
+            "macOS arm64 (`com.maskarauder.micdrop.mac`) is ad-hoc signed without Apple notarization",
+            api.release["body"],
+        )
+        self.assertNotIn("Authenticode-signed", api.release["body"])
+        self.assertNotIn("Apple-notarized", api.release["body"])
         self.assertEqual(len(api.assets), len(REQUIRED_SUFFIXES) + 2)
         self.assertEqual(len((self.root / "done/SHA256SUMS").read_text().splitlines()), len(REQUIRED_SUFFIXES) + 1)
         assets = copy.deepcopy(api.assets)
@@ -493,12 +778,161 @@ class DraftReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "edited")
 
+    def test_release_notes_report_signed_and_notarized_only_when_verified(self):
+        api = FakeGitHub()
+        release.prepare(api, RUN, IDENTITY, NOTES)
+        signed_dir = self.root / "signed-upload"
+        signed_dir.mkdir()
+        for suffix in REQUIRED_SUFFIXES:
+            path = signed_dir / ("MicDrop-" + IDENTITY["version"] + suffix)
+            path.write_bytes(self._suffix_payload(suffix, win_signed=True, mac_notarized=True))
+            release.upload(api, 7, RUN, IDENTITY, path)
+        release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "finish-signed")
+        self.assertIn(
+            "Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped",
+            api.release["body"],
+        )
+        self.assertIn(
+            "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed and Apple-notarized",
+            api.release["body"],
+        )
+        self.assertIn("no iPhone `.ipa` is attached to this draft", api.release["body"])
+
+        # Developer ID signed macOS without notarization must be reported accurately (neither ad-hoc nor notarized).
+        dev_id_api = FakeGitHub()
+        release.prepare(dev_id_api, RUN, IDENTITY, NOTES)
+        dev_id_dir = self.root / "dev-id-upload"
+        dev_id_dir.mkdir()
+        for suffix in REQUIRED_SUFFIXES:
+            path = dev_id_dir / ("MicDrop-" + IDENTITY["version"] + suffix)
+            path.write_bytes(self._suffix_payload(suffix, win_signed=True, mac_notarized=False, mac_dev_id=True))
+            release.upload(dev_id_api, 7, RUN, IDENTITY, path)
+        release.finish(dev_id_api, 7, RUN, IDENTITY, NOTES, self.root / "finish-dev-id")
+        self.assertIn(
+            "macOS arm64 (`com.maskarauder.micdrop.mac`) is Developer ID signed without Apple notarization",
+            dev_id_api.release["body"],
+        )
+        self.assertNotIn("ad-hoc", dev_id_api.release["body"].lower())
+        self.assertNotIn("Apple-notarized", dev_id_api.release["body"])
+
+        # Contradictory signing flags vs descriptions are rejected during finish().
+        for label, bad_platform, overrides, pattern in (
+            (
+                "wrong_sha",
+                "windows",
+                {"source_sha": "b" * 40},
+                "Build manifest identity or signing metadata mismatch",
+            ),
+            (
+                "notarized_but_not_dev_id",
+                "macos",
+                {"developer_id_signed": False, "notarized": True, "signing": "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"},
+                "Inconsistent macOS signing metadata",
+            ),
+            (
+                "dev_id_flag_with_adhoc_text",
+                "macos",
+                {"developer_id_signed": True, "notarized": False, "signing": "ad-hoc signed macOS arm64 app bundle and CLI host"},
+                "Unrecognized or inconsistent macOS signing metadata",
+            ),
+            (
+                "win_false_flag_with_signed_text",
+                "windows",
+                {"authenticode_signed": False, "signing": "Authenticode-signed and timestamped Windows x64 installer and portable payload"},
+                "Unrecognized or inconsistent Windows signing metadata",
+            ),
+        ):
+            with self.subTest(label=label):
+                bad_api = FakeGitHub()
+                release.prepare(bad_api, RUN, IDENTITY, NOTES)
+                bad_dir = self.root / f"bad-manifest-{label}"
+                bad_dir.mkdir()
+                for suffix in REQUIRED_SUFFIXES:
+                    path = bad_dir / ("MicDrop-" + IDENTITY["version"] + suffix)
+                    if suffix == f"-{bad_platform}-build.json":
+                        path.write_bytes(build_manifest_bytes(bad_platform, overrides=overrides))
+                    else:
+                        path.write_bytes(self._suffix_payload(suffix))
+                    release.upload(bad_api, 7, RUN, IDENTITY, path)
+                with self.assertRaisesRegex(ValueError, pattern):
+                    release.finish(bad_api, 7, RUN, IDENTITY, NOTES, self.root / f"finish-bad-{label}")
+
+    def test_github_asset_bytes_follows_signed_redirect_without_forwarding_token(self):
+        payload = b'{"schema":1}'
+        digest_hex = hashlib.sha256(payload).hexdigest()
+        asset = {
+            "id": 321,
+            "name": "MicDrop-0.1.0-beta.1-windows-build.json",
+            "state": "uploaded",
+            "size": len(payload),
+            "digest": "sha256:" + digest_hex,
+        }
+        seen_requests = []
+        redirect_url = {"value": "https://objects.githubusercontent.com/github-production-release-asset/blob?sig=1"}
+
+        class _FakeResp:
+            def __init__(self, body):
+                self._buf = io.BytesIO(body)
+
+            def read(self, size=-1):
+                return self._buf.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_build_opener(*handlers):
+            class _Opener:
+                def open(self, req, timeout=60):
+                    seen_requests.append((req.full_url, dict(req.header_items())))
+                    if req.full_url.startswith("https://api.github.com/"):
+                        for handler in handlers:
+                            if hasattr(handler, "location"):
+                                handler.redirect_request(
+                                    req, None, 302, "Found", {}, redirect_url["value"]
+                                )
+                        raise urllib.error.HTTPError(
+                            req.full_url, 302, "Found", {"Location": redirect_url["value"]}, None
+                        )
+                    return _FakeResp(payload)
+
+            return _Opener()
+
+        gh = release.GitHub("test/MicDrop", "ghs_super_secret_token")
+        with patch("urllib.request.build_opener", side_effect=fake_build_opener):
+            out = gh.asset_bytes(asset)
+            self.assertEqual(out, payload)
+            self.assertEqual(len(seen_requests), 2)
+            self.assertEqual(
+                seen_requests[0][0],
+                "https://api.github.com/repos/test/MicDrop/releases/assets/321",
+            )
+            self.assertEqual(seen_requests[0][1].get("Authorization"), "Bearer ghs_super_secret_token")
+            # Redirected download to objects.githubusercontent.com must NEVER receive Authorization!
+            self.assertNotIn("Authorization", seen_requests[1][1])
+
+            # Untrusted redirect origins are rejected without fetching.
+            redirect_url["value"] = "https://evil.example.com/steal"
+            with self.assertRaisesRegex(ValueError, "Unexpected redirect origin"):
+                gh.asset_bytes(asset)
+
+            # SHA-256 mismatch is rejected.
+            redirect_url["value"] = "https://objects.githubusercontent.com/github-production-release-asset/blob"
+            bad_asset = {**asset, "digest": "sha256:" + "0" * 64}
+            with self.assertRaisesRegex(ValueError, "SHA-256 verification"):
+                gh.asset_bytes(bad_asset)
+
     def test_finalization_rejects_an_unexpected_returned_tag(self):
         api = FakeGitHub()
         release.prepare(api, RUN, IDENTITY, NOTES)
-        api.assets = [{"name": "MicDrop-" + IDENTITY["version"] + suffix,
-                       "state": "uploaded", "digest": "sha256:" + "b" * 64, "size": 1}
-                      for suffix in REQUIRED_SUFFIXES]
+        tag_dir = self.root / "tag-upload"
+        tag_dir.mkdir()
+        for suffix in REQUIRED_SUFFIXES:
+            path = tag_dir / ("MicDrop-" + IDENTITY["version"] + suffix)
+            path.write_bytes(self._suffix_payload(suffix))
+            release.upload(api, 7, RUN, IDENTITY, path)
         request = api.request
 
         def reset_tag(method, path, data=None, file=None):
@@ -516,16 +950,20 @@ class DraftReleaseTests(unittest.TestCase):
         release.prepare(api, RUN, IDENTITY, NOTES)
         for suffix in [*REQUIRED_SUFFIXES, "-ios-arm64-unsigned.ipa"]:
             path = self.root / ("MicDrop-" + IDENTITY["version"] + suffix)
-            path.write_bytes(suffix.encode())
+            path.write_bytes(self._suffix_payload(suffix))
             release.upload(api, 7, RUN, IDENTITY, path)
         with self.assertRaisesRegex(ValueError, "missing or unexpected assets"):
             release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "half-ios")
         ios_meta = self.root / ("MicDrop-" + IDENTITY["version"] + "-ios-build.json")
-        ios_meta.write_bytes(b"{}")
+        ios_meta.write_bytes(build_manifest_bytes("ios"))
         release.upload(api, 7, RUN, IDENTITY, ios_meta)
         release.finish(api, 7, RUN, IDENTITY, NOTES, self.root / "with-ios")
         self.assertEqual(len(api.assets), len(REQUIRED_SUFFIXES) + 4)
         self.assertEqual(len((self.root / "with-ios/SHA256SUMS").read_text().splitlines()), len(REQUIRED_SUFFIXES) + 3)
+        self.assertIn(
+            "the included iPhone `.ipa` (`com.maskarauder.micdrop`) is unsigned for Apple ID sideloading",
+            api.release["body"],
+        )
         manifest = json.loads((self.root / "with-ios/release-manifest.json").read_text())
         self.assertIn("MicDrop-0.1.0-beta.1-ios-arm64-unsigned.ipa", [a["name"] for a in manifest["assets"]])
         self.assertIn("MicDrop-0.1.0-beta.1-ios-build.json", [a["name"] for a in manifest["assets"]])

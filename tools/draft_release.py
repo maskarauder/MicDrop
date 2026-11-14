@@ -29,6 +29,7 @@ from windows_payload import PORTABLE, INSTALLER_ONLY
 
 SHA = r"[0-9a-f]{40}"
 DIGEST = r"[0-9a-f]{64}"
+IOS_BUNDLE_ID = "com.maskarauder.micdrop"
 
 
 def digest(path):
@@ -69,7 +70,7 @@ def run_command(arguments):
     result = subprocess.run([str(a) for a in arguments], capture_output=True, text=True, timeout=60)
     if result.returncode:
         raise ValueError(f"Package verification failed: {Path(arguments[0]).name}")
-    return result.stdout
+    return result.stdout if result.stdout else result.stderr
 
 
 def _extract_verified_host_tarball(tar_path, destination):
@@ -105,6 +106,143 @@ def _extract_verified_app_zip(zip_path, destination):
                 if os.name != "nt":
                     perms = (item.external_attr >> 16) & 0o777
                     os.chmod(target, perms if perms else 0o644)
+
+
+def _inspect_windows_authenticode(targets, command):
+    quoted = ", ".join("'" + str(Path(p)).replace("'", "''") + "'" for p in targets)
+    ps_script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$paths = @({quoted}); "
+        "$out = foreach ($p in $paths) { "
+        "$sig = Get-AuthenticodeSignature -LiteralPath $p; "
+        "$cert = $sig.SignerCertificate; "
+        "$ts = $sig.TimeStamperCertificate; "
+        "[ordered]@{ "
+        "file = [IO.Path]::GetFileName($p); "
+        "status = [string]$sig.Status; "
+        "status_message = [string]$sig.StatusMessage; "
+        "subject = if ($null -ne $cert) { [string]$cert.Subject } else { '' }; "
+        "issuer = if ($null -ne $cert) { [string]$cert.Issuer } else { '' }; "
+        "sha256 = if ($null -ne $cert) { $cert.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant() } else { '' }; "
+        "timestamped = ($null -ne $ts) "
+        "} }; "
+        "ConvertTo-Json -InputObject @($out) -Compress"
+    )
+    raw = command(["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps_script])
+    records = json.loads(raw)
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list) or len(records) != len(targets):
+        raise ValueError("Unexpected Authenticode inspection output for Windows packages")
+    statuses = [rec.get("status") for rec in records]
+    if all(status == "NotSigned" for status in statuses):
+        return {
+            "authenticode_signed": False,
+            "signing": "unsigned Windows development packages",
+        }
+    if any(status == "NotSigned" for status in statuses):
+        raise ValueError("Inconsistent Windows Authenticode signing state across setup and runtime binaries")
+    subjects = set()
+    issuers = set()
+    for rec in records:
+        if rec.get("status") != "Valid":
+            raise ValueError(
+                f"Invalid Windows Authenticode signature on {rec.get('file')}: "
+                f"{rec.get('status')} ({rec.get('status_message')})"
+            )
+        if rec.get("timestamped") is not True:
+            raise ValueError(
+                f"Windows Authenticode signature on {rec.get('file')} is missing an RFC 3161 timestamp"
+            )
+        cert_sha = rec.get("sha256", "")
+        subject = rec.get("subject", "").strip()
+        issuer = rec.get("issuer", "").strip()
+        if not re.fullmatch(DIGEST, cert_sha) or not subject:
+            raise ValueError(f"Missing signer certificate metadata on {rec.get('file')}")
+        subjects.add(subject)
+        issuers.add(issuer)
+    if len(subjects) != 1:
+        raise ValueError("Mismatched Windows Authenticode signer subjects across Windows packages")
+    return {
+        "authenticode_signed": True,
+        "signing": "Authenticode-signed and timestamped Windows x64 installer and portable payload",
+        "signer_subject": next(iter(subjects)),
+        "signer_issuer": next(iter(issuers)),
+        "certificate_sha256": records[-1]["sha256"],
+    }
+
+
+def _inspect_macos_codesign(app_bundle, cli_dylib, cli_exe, *, stapled, command):
+    app_dylib = app_bundle / "Contents" / "Frameworks" / UNIX_HOST_PLATFORMS["macos-arm64"]["rtc_lib"]
+    targets = [
+        ("MicDrop.app", app_bundle),
+        (f"MicDrop.app/{app_dylib.name}", app_dylib),
+        (cli_dylib.name, cli_dylib),
+        (cli_exe.name, cli_exe),
+    ]
+    parsed = []
+    for label, target in targets:
+        details = command(["codesign", "-dv", "--verbose=4", target])
+        authorities = [m.strip() for m in re.findall(r"^Authority=(.+)$", details, re.MULTILINE)]
+        team_match = re.search(r"^TeamIdentifier=(.+)$", details, re.MULTILINE)
+        team_id = team_match.group(1).strip() if team_match else ""
+        is_adhoc = not authorities and bool(
+            re.search(r"^Signature=adhoc\b|^CodeDirectory\b[^\n]*\([^)\n]*\badhoc\b[^)\n]*\)", details, re.MULTILINE)
+        )
+        if is_adhoc:
+            if team_id not in {"", "not set"}:
+                raise ValueError(f"Unexpected TeamIdentifier {team_id!r} on ad-hoc signed {label}")
+            parsed.append({"mode": "adhoc", "label": label})
+            continue
+        if not authorities:
+            raise ValueError(f"Unrecognized or missing macOS code signature metadata on {label}")
+        leaf_authority = authorities[0]
+        if not leaf_authority.startswith("Developer ID Application:"):
+            raise ValueError(f"Unsupported macOS signing authority on {label}: {leaf_authority}")
+        if not re.fullmatch(r"[A-Z0-9]{10}", team_id):
+            raise ValueError(f"Missing or invalid macOS TeamIdentifier on {label}: {team_id!r}")
+        if not re.search(r"^CodeDirectory\b[^\n]*\([^)\n]*\bruntime\b[^)\n]*\)", details, re.MULTILINE):
+            raise ValueError(f"macOS Developer ID signature on {label} is missing Hardened Runtime")
+        if not re.search(r"^Timestamp=\S", details, re.MULTILINE):
+            raise ValueError(f"macOS Developer ID signature on {label} is missing a secure timestamp")
+        parsed.append({
+            "mode": "developer_id",
+            "label": label,
+            "authority": leaf_authority,
+            "team_id": team_id,
+        })
+
+    modes = {item["mode"] for item in parsed}
+    if len(modes) != 1:
+        raise ValueError("Inconsistent macOS code-signing state across MicDrop.app and CLI host binaries")
+    mode = next(iter(modes))
+    if mode == "adhoc":
+        if stapled:
+            raise ValueError("Ad-hoc signed macOS app bundle cannot carry a stapled notarization ticket")
+        return {
+            "developer_id_signed": False,
+            "notarized": False,
+            "signing": "ad-hoc signed macOS arm64 app bundle and CLI host",
+        }
+
+    authorities = {item["authority"] for item in parsed}
+    team_ids = {item["team_id"] for item in parsed}
+    if len(authorities) != 1 or len(team_ids) != 1:
+        raise ValueError("Mismatched Developer ID signer identity across macOS app bundle and CLI host")
+    authority = next(iter(authorities))
+    team_id = next(iter(team_ids))
+    if stapled:
+        command(["xcrun", "stapler", "validate", app_bundle])
+        signing_desc = "Developer ID signed and Apple-notarized macOS arm64 app bundle and CLI host"
+    else:
+        signing_desc = "Developer ID signed macOS arm64 app bundle and CLI host (not notarized)"
+    return {
+        "developer_id_signed": True,
+        "notarized": stapled,
+        "signing": signing_desc,
+        "signer_authority": authority,
+        "team_id": team_id,
+    }
 
 
 def stage(platform, root, output, run_id, attempt, sha, identity, command=run_command, *, ios_ipa=None):
@@ -158,7 +296,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
                 with archive.open(item, "w") as target, path.open("rb") as source:
                     shutil.copyfileobj(source, target)
         packages.append(portable)
-        info["signing"] = "unsigned Windows development packages"
+        info.update(_inspect_windows_authenticode([host["MicDrop.exe"], host["micdrop_rtc.dll"], setup], command))
     elif platform == "linux":
         files = retained(root, "linux-x64-host", run_id, attempt, sha)
         tarball = files["MicDrop-linux-x64-host.tar.gz"]
@@ -200,6 +338,10 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
             cli_dylib = host_root / top_dir / UNIX_HOST_PLATFORMS["macos-arm64"]["rtc_lib"]
             command(["codesign", "--verify", "--deep", "--strict", app_bundle])
             command(["codesign", "--verify", "--strict", cli_dylib, cli_exe])
+            stapled = (app_bundle / "Contents" / "CodeResources").is_file()
+            macos_sig = _inspect_macos_codesign(
+                app_bundle, cli_dylib, cli_exe, stapled=stapled, command=command
+            )
             expected_embed = {**identity, "revision": sha, "modified": False, "platform": "darwin/arm64"}
             app_actual = json.loads(command([app_exe, "version"]))
             if any(app_actual.get(k) != v for k, v in expected_embed.items()):
@@ -216,7 +358,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         info.update({
             "bundle_id": MACOS_BUNDLE_ID,
             "minimum_os": DEFAULT_MIN_MACOS,
-            "signing": "ad-hoc signed macOS arm64 app bundle and CLI host",
+            **macos_sig,
         })
     elif platform == "android":
         files = retained(root, "android-apk", run_id, attempt, sha)
@@ -248,7 +390,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         versions = bundle_versions(identity)
         check_ipa(
             ipa,
-            "com.maskarauder.micdrop.dev",
+            IOS_BUNDLE_ID,
             "17.0",
             sha[:12],
             marketing_version=versions["MICDROP_MARKETING_VERSION"],
@@ -259,7 +401,7 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
         shutil.copyfile(ipa, target)
         packages.append(target)
         info.update({
-            "bundle_id": "com.maskarauder.micdrop.dev",
+            "bundle_id": IOS_BUNDLE_ID,
             "minimum_os": "17.0",
             "signing": "unsigned iPhone bundle (sideload with Apple ID)",
             "ipa_provenance": provenance,
@@ -275,6 +417,15 @@ def stage(platform, root, output, run_id, attempt, sha, identity, command=run_co
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, newurl):
         raise ValueError("Unexpected API redirect; credentials were not forwarded")
+
+
+class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self):
+        self.location = None
+
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        self.location = newurl
+        return None
 
 
 class GitHub:
@@ -312,6 +463,58 @@ class GitHub:
         finally:
             if file:
                 payload.close()
+
+    def asset_bytes(self, asset, *, max_bytes=262144):
+        asset_id = asset.get("id")
+        if not isinstance(asset_id, int) or asset_id <= 0:
+            raise ValueError(f"Release asset has an invalid ID: {asset.get('name')}")
+        expected_digest = asset.get("digest", "")
+        expected_size = asset.get("size")
+        if (asset.get("state") != "uploaded" or not re.fullmatch("sha256:" + DIGEST, expected_digest)
+                or not isinstance(expected_size, int) or expected_size < 0 or expected_size > max_bytes):
+            raise ValueError(f"Release asset metadata is incomplete or oversized: {asset.get('name')}")
+
+        api_url = f"{self.base}/releases/assets/{asset_id}"
+        headers = {
+            "Authorization": "Bearer " + self.token,
+            "Accept": "application/octet-stream",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "MicDrop-draft-release",
+        }
+        capture = _CaptureRedirect()
+        raw = None
+        try:
+            req = urllib.request.Request(api_url, headers=headers, method="GET")
+            with urllib.request.build_opener(capture).open(req, timeout=60) as response:
+                raw = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308} or not capture.location:
+                raise ValueError(f"GitHub GET /releases/assets/{asset_id} failed with HTTP {error.code}") from None
+
+        if raw is None:
+            parsed_loc = urllib.parse.urlsplit(capture.location)
+            loc_host = (parsed_loc.hostname or "").lower()
+            if parsed_loc.scheme != "https" or not (
+                loc_host == "githubusercontent.com" or loc_host.endswith(".githubusercontent.com")
+            ):
+                raise ValueError("Unexpected redirect origin for GitHub release asset download")
+            try:
+                dl_req = urllib.request.Request(
+                    capture.location,
+                    headers={"User-Agent": "MicDrop-draft-release"},
+                    method="GET",
+                )
+                with urllib.request.build_opener(NoRedirect).open(dl_req, timeout=60) as response:
+                    raw = response.read(max_bytes + 1)
+            except urllib.error.HTTPError as error:
+                raise ValueError(f"Release asset download failed with HTTP {error.code}") from None
+
+        if len(raw) > max_bytes:
+            raise ValueError(f"Release asset exceeds size limit: {asset.get('name')}")
+        actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if len(raw) != expected_size or actual_digest != expected_digest:
+            raise ValueError(f"Downloaded release asset failed SHA-256 verification: {asset.get('name')}")
+        return raw
 
     def listing(self, path):
         result = []
@@ -358,13 +561,107 @@ def marker(run):
     return f"<!-- micdrop-draft-v1 source={run['head_sha']} run={run['id']} attempt={run['run_attempt']} -->"
 
 
-def release_body(run, identity, notes, complete):
-    status = "Packages verified; draft awaits human review." if complete else "INCOMPLETE: package uploads/verification are still pending. Do not publish."
+def _signing_summary_from_builds(builds):
+    if not isinstance(builds, dict):
+        raise ValueError("Verified build manifests are required to describe package signing")
+    for required_platform in ("windows", "linux", "macos", "android"):
+        if required_platform not in builds or not isinstance(builds[required_platform], dict):
+            raise ValueError(f"Missing verified {required_platform} build manifest")
+
+    win = builds["windows"]
+    win_signing = str(win.get("signing", ""))
+    win_signing_lower = win_signing.lower()
+    win_signed = win.get("authenticode_signed")
+    if not isinstance(win_signed, bool) and win_signed is not None:
+        raise ValueError(f"Invalid Windows authenticode_signed value: {win_signed!r}")
+    if (
+        (win_signed is True or (win_signed is None and bool(win.get("certificate_sha256"))))
+        and "authenticode-signed" in win_signing_lower
+        and "unsigned" not in win_signing_lower
+    ):
+        win_clause = "Windows x64 (`MicDrop.exe`, `micdrop_rtc.dll`, and setup/uninstaller) is Authenticode-signed and timestamped"
+    elif (
+        win_signed in {False, None}
+        and "unsigned" in win_signing_lower
+        and "authenticode-signed" not in win_signing_lower
+    ):
+        win_clause = "Windows x64 packages are unsigned"
+    else:
+        raise ValueError(f"Unrecognized or inconsistent Windows signing metadata: {win_signing!r}")
+
+    mac = builds["macos"]
+    mac_bundle_id = mac.get("bundle_id", MACOS_BUNDLE_ID)
+    mac_signing = str(mac.get("signing", ""))
+    mac_signing_lower = mac_signing.lower()
+    mac_dev_id = mac.get("developer_id_signed")
+    mac_notarized = mac.get("notarized")
+    if (not isinstance(mac_dev_id, bool) and mac_dev_id is not None) or (
+        not isinstance(mac_notarized, bool) and mac_notarized is not None
+    ):
+        raise ValueError(
+            f"Invalid macOS signing flags: developer_id_signed={mac_dev_id!r}, notarized={mac_notarized!r}"
+        )
+    if mac_notarized is True and mac_dev_id is False:
+        raise ValueError("Inconsistent macOS signing metadata: notarized bundle must be Developer ID signed")
+    if (
+        (mac_notarized is True or (mac_notarized is None and "apple-notarized" in mac_signing_lower))
+        and mac_dev_id in {True, None}
+        and "developer id signed" in mac_signing_lower
+        and "apple-notarized" in mac_signing_lower
+        and "ad-hoc" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is Developer ID signed and Apple-notarized"
+    elif (
+        mac_notarized in {False, None}
+        and (mac_dev_id is True or (mac_dev_id is None and "developer id signed" in mac_signing_lower))
+        and "developer id signed" in mac_signing_lower
+        and "apple-notarized" not in mac_signing_lower
+        and "ad-hoc" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is Developer ID signed without Apple notarization"
+    elif (
+        mac_notarized in {False, None}
+        and mac_dev_id in {False, None}
+        and "ad-hoc" in mac_signing_lower
+        and "developer id" not in mac_signing_lower
+        and "apple-notarized" not in mac_signing_lower
+    ):
+        mac_clause = f"macOS arm64 (`{mac_bundle_id}`) is ad-hoc signed without Apple notarization"
+    else:
+        raise ValueError(f"Unrecognized or inconsistent macOS signing metadata: {mac_signing!r}")
+
+    linux_signing = str(builds["linux"].get("signing", ""))
+    if "unsigned" not in linux_signing.lower():
+        raise ValueError(f"Unrecognized Linux signing metadata: {linux_signing!r}")
+    linux_clause = "Linux x64 is unsigned"
+
+    android_meta = builds["android"]
+    android_app_id = android_meta.get("application_id", "com.maskarauder.micdrop.dev")
+    android_clause = f"Android uses the existing development signer (`{android_app_id}`)"
+
+    if "ios" in builds:
+        ios_meta = builds["ios"]
+        ios_bundle_id = ios_meta.get("bundle_id", IOS_BUNDLE_ID)
+        ios_clause = (
+            f"the included iPhone `.ipa` (`{ios_bundle_id}`) is unsigned for Apple ID sideloading "
+            "(TestFlight builds are distributed via App Store Connect)"
+        )
+    else:
+        ios_clause = "no iPhone `.ipa` is attached to this draft (TestFlight builds are distributed via App Store Connect)"
+
+    return f"Package signing: {win_clause}; {mac_clause}; {linux_clause}; {android_clause}; {ios_clause}."
+
+
+def release_body(run, identity, notes, complete, *, builds=None):
+    if complete:
+        status = "Packages verified; draft awaits human review."
+        signing_summary = _signing_summary_from_builds(builds)
+    else:
+        status = "INCOMPLETE: package uploads/verification are still pending. Do not publish."
+        signing_summary = "Package signing: pending package verification during draft assembly."
     return (marker(run) + "\n\n" + status + "\n\n" + notes.strip() + "\n\n"
-            + "Development packages: Windows and Linux x64 are unsigned; macOS arm64 uses ad-hoc code signing (`com.maskarauder.micdrop.mac`); "
-            + "Android uses the existing development signer and `com.maskarauder.micdrop.dev`. "
-            + "First-party source is MPL-2.0; provide recipients with matching source and notices. "
-            + "Production signing and store distribution remain separate release work.\n\n"
+            + signing_summary + " "
+            + "First-party source is MPL-2.0; provide recipients with matching source and notices.\n\n"
             + f"Source: `{run['head_sha']}` · Android version code: `{identity['android_version_code']}`\n\n"
             + f"Verified build: {run['html_url']} (attempt {run['run_attempt']}).\n")
 
@@ -409,10 +706,35 @@ def upload(api, release_id, run, identity, path):
         raise ValueError("Uploaded asset failed GitHub digest verification")
 
 
+def _verified_build_manifests(api, by_name, prefix, run, identity, *, include_ios):
+    platforms = ["windows", "linux", "macos", "android"] + (["ios"] if include_ios else [])
+    builds = {}
+    for platform in platforms:
+        asset_name = f"{prefix}-{platform}-build.json"
+        raw = api.asset_bytes(by_name[asset_name])
+        try:
+            meta = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Unreadable build manifest JSON: {asset_name}") from exc
+        if not isinstance(meta, dict):
+            raise ValueError(f"Invalid build manifest structure: {asset_name}")
+        if (meta.get("schema") != 1
+                or meta.get("version") != identity["version"]
+                or meta.get("android_version_code") != identity["android_version_code"]
+                or meta.get("source_sha") != run["head_sha"]
+                or (platform != "ios" and (
+                    meta.get("build_run_id") != str(run["id"])
+                    or meta.get("build_attempt") != str(run["run_attempt"])
+                ))
+                or not isinstance(meta.get("signing"), str)
+                or not meta["signing"].strip()):
+            raise ValueError(f"Build manifest identity or signing metadata mismatch: {asset_name}")
+        builds[platform] = meta
+    return builds
+
+
 def finish(api, release_id, run, identity, notes, output):
     release = owned_draft(api, release_id, run, identity)
-    if release["body"] not in {release_body(run, identity, notes, False), release_body(run, identity, notes, True)}:
-        raise ValueError("Release notes were edited manually; refusing to overwrite them")
     prefix = "MicDrop-" + identity["version"]
     required = {
         prefix + suffix
@@ -436,7 +758,9 @@ def finish(api, release_id, run, identity, notes, output):
     if (len(names) != len(assets) or not required <= names or not names <= allowed
             or (bool(names & optional_ios) and not optional_ios <= names)):
         raise ValueError("Release has missing or unexpected assets")
-    packaged = required | (optional_ios if optional_ios <= names else set())
+    include_ios = optional_ios <= names
+    packaged = required | (optional_ios if include_ios else set())
+    by_name = {a["name"]: a for a in assets}
     files = []
     for asset in sorted(assets, key=lambda a: a["name"]):
         if asset["name"] not in packaged:
@@ -444,6 +768,10 @@ def finish(api, release_id, run, identity, notes, output):
         if asset.get("state") != "uploaded" or not re.fullmatch("sha256:" + DIGEST, asset.get("digest", "")):
             raise ValueError("Release asset is incomplete or has no SHA-256 digest")
         files.append({"name": asset["name"], "bytes": asset["size"], "sha256": asset["digest"][7:]})
+    builds = _verified_build_manifests(api, by_name, prefix, run, identity, include_ios=include_ios)
+    complete_body = release_body(run, identity, notes, True, builds=builds)
+    if release["body"] not in {release_body(run, identity, notes, False), complete_body}:
+        raise ValueError("Release notes were edited manually; refusing to overwrite them")
     output.mkdir(parents=True, exist_ok=False)
     manifest = output / "release-manifest.json"
     write_json(manifest, {"schema": 1, **identity, "source_sha": run["head_sha"], "build_run_id": str(run["id"]),
@@ -457,7 +785,7 @@ def finish(api, release_id, run, identity, notes, output):
     # GitHub resets a draft's pending tag to untagged-* if an update omits it.
     # Never change publication state, including if a human publishes during this request.
     updated = api.request("PATCH", f"/releases/{release_id}", {
-        "tag_name": "v" + identity["version"], "body": release_body(run, identity, notes, True)})
+        "tag_name": "v" + identity["version"], "body": complete_body})
     if updated.get("draft") is not True:
         raise ValueError("Release was published during finalization; its publication state was not changed")
     if updated.get("tag_name") != "v" + identity["version"]:
