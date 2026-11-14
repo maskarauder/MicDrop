@@ -111,9 +111,9 @@ def _tool_output_detail(stdout, stderr, sensitive):
 
     # Keep the exception headline and final context from each stream. Redact before
     # truncation so cutting through a credential cannot leave part of it exposed.
-    budget = (2500 - (len(parts) - 1)) // len(parts)
+    budget = (32000 - (len(parts) - 1)) // len(parts)
     marker = "\n... [output truncated] ...\n"
-    head = (budget - len(marker)) // 2
+    head = (budget - len(marker)) * 3 // 4
     tail = budget - len(marker) - head
     return "\n".join(
         part if len(part) <= budget else part[:head] + marker + part[-tail:]

@@ -395,10 +395,32 @@ class WindowsSigningTests(unittest.TestCase):
 
     def test_long_tool_failures_keep_redacted_headlines_and_final_context(self):
         secret_value = "dummy-secret-must-never-appear"
-        stdout = f"SignTool request failed: {secret_value}\n" + "stdout stack frame\n" * 300
+        metadata = {
+            "Endpoint": ENDPOINT,
+            "CodeSigningAccountName": ACCOUNT,
+            "CertificateProfileName": PROFILE,
+            "ExcludeCredentials": list(windows_signing.ALL_AZURE_CREDENTIALS),
+            "ToolPaths": {
+                name: f"C:/actions/_temp/micdrop-windows-signing/toolchain/artifact-signing-dlib-1.0.146-x64/{name}"
+                for name in (
+                    "Azure.CodeSigning.Dlib.dll", "Azure.Core.dll", "Azure.Identity.dll",
+                    "Microsoft.Identity.Client.dll", "System.ClientModel.dll", "signtool.exe",
+                )
+            },
+        }
+        preamble = "Signing metadata:\n" + json.dumps(metadata, indent=2) + "\nSubmitting digest for signing...\n"
+        self.assertGreater(len(preamble), 1200)
+        exception = (
+            f"Unhandled managed exception: Azure.Identity.AuthenticationFailedException: {secret_value}\n"
+            " ---> Microsoft.Identity.Client.MsalServiceException: "
+            f"AADSTS70021: No matching federated identity; {secret_value}\n"
+        )
+        stdout = preamble + exception + "   at Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.ProcessAsync(...)\n" * 600
         stdout += f"Final stdout context: {secret_value}"
-        stderr = f"AADSTS70021: No matching federated identity; {secret_value}\n" + "stderr stack frame\n" * 300
+        stderr = preamble + exception + "   at Azure.CodeSigning.Dlib.Core.DigestSigner.SignAsync(...)\n" * 600
         stderr += f"Final stderr context: {secret_value}"
+        self.assertGreater(len(stdout), 32000)
+        self.assertGreater(len(stderr), 32000)
         arguments = ["signtool.exe", "sign", "dummy.dll"]
 
         for failure_mode in ("nonzero", "timeout"):
@@ -417,8 +439,9 @@ class WindowsSigningTests(unittest.TestCase):
                     windows_signing.run_tool(arguments, redact=(secret_value,))
                 message = str(ctx.exception)
                 self.assertTrue(message.startswith(prefix))
-                self.assertLessEqual(len(message) - len(prefix), 2500)
-                self.assertIn("SignTool request failed: [REDACTED]", message)
+                self.assertLessEqual(len(message) - len(prefix), 32000)
+                self.assertIn("Unhandled managed exception: Azure.Identity.AuthenticationFailedException: [REDACTED]", message)
+                self.assertIn("Microsoft.Identity.Client.MsalServiceException", message)
                 self.assertIn("AADSTS70021: No matching federated identity; [REDACTED]", message)
                 self.assertIn("Final stdout context: [REDACTED]", message)
                 self.assertIn("Final stderr context: [REDACTED]", message)
