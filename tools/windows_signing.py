@@ -99,6 +99,28 @@ def _redact(text, sensitive):
     return result
 
 
+def _tool_output_detail(stdout, stderr, sensitive):
+    parts = []
+    for output in (stdout, stderr):
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        if output and output.strip():
+            parts.append(_redact(output.strip(), sensitive))
+    if not parts:
+        return ""
+
+    # Keep the exception headline and final context from each stream. Redact before
+    # truncation so cutting through a credential cannot leave part of it exposed.
+    budget = (2500 - (len(parts) - 1)) // len(parts)
+    marker = "\n... [output truncated] ...\n"
+    head = (budget - len(marker)) // 2
+    tail = budget - len(marker) - head
+    return "\n".join(
+        part if len(part) <= budget else part[:head] + marker + part[-tail:]
+        for part in parts
+    )
+
+
 def run_tool(arguments, *, redact=(), env=None, timeout=180):
     str_args = [str(a) for a in arguments]
     tool_name = Path(str_args[0]).name
@@ -111,12 +133,7 @@ def run_tool(arguments, *, redact=(), env=None, timeout=180):
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        err = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        combined = "\n".join(part.strip() for part in (out, err) if part and part.strip())
-        detail = _redact(combined, redact)
-        if len(detail) > 2500:
-            detail = detail[-2500:]
+        detail = _tool_output_detail(exc.stdout, exc.stderr, redact)
         msg = f"{tool_name} timed out after {timeout}s"
         if detail:
             msg = f"{msg}: {detail}"
@@ -126,10 +143,7 @@ def run_tool(arguments, *, redact=(), env=None, timeout=180):
         raise RuntimeError(f"{tool_name} could not be started: {detail}") from None
 
     if proc.returncode != 0:
-        combined = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
-        detail = _redact(combined, redact)
-        if len(detail) > 2500:
-            detail = detail[-2500:]
+        detail = _tool_output_detail(proc.stdout, proc.stderr, redact)
         msg = f"{tool_name} failed (exit {proc.returncode})"
         if detail:
             msg = f"{msg}: {detail}"

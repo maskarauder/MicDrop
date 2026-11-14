@@ -393,6 +393,38 @@ class WindowsSigningTests(unittest.TestCase):
 
             windows_signing.cleanup()
 
+    def test_long_tool_failures_keep_redacted_headlines_and_final_context(self):
+        secret_value = "dummy-secret-must-never-appear"
+        stdout = f"SignTool request failed: {secret_value}\n" + "stdout stack frame\n" * 300
+        stdout += f"Final stdout context: {secret_value}"
+        stderr = f"AADSTS70021: No matching federated identity; {secret_value}\n" + "stderr stack frame\n" * 300
+        stderr += f"Final stderr context: {secret_value}"
+        arguments = ["signtool.exe", "sign", "dummy.dll"]
+
+        for failure_mode in ("nonzero", "timeout"):
+            with self.subTest(failure_mode=failure_mode):
+                if failure_mode == "timeout":
+                    result = {"side_effect": subprocess.TimeoutExpired(
+                        arguments, 180, output=stdout.encode("utf-8"), stderr=stderr.encode("utf-8")
+                    )}
+                    prefix = "signtool.exe timed out after 180s: "
+                else:
+                    result = {"return_value": subprocess.CompletedProcess(
+                        arguments, 1, stdout=stdout, stderr=stderr
+                    )}
+                    prefix = "signtool.exe failed (exit 1): "
+                with patch("subprocess.run", **result), self.assertRaises(RuntimeError) as ctx:
+                    windows_signing.run_tool(arguments, redact=(secret_value,))
+                message = str(ctx.exception)
+                self.assertTrue(message.startswith(prefix))
+                self.assertLessEqual(len(message) - len(prefix), 2500)
+                self.assertIn("SignTool request failed: [REDACTED]", message)
+                self.assertIn("AADSTS70021: No matching federated identity; [REDACTED]", message)
+                self.assertIn("Final stdout context: [REDACTED]", message)
+                self.assertIn("Final stderr context: [REDACTED]", message)
+                self.assertNotIn(secret_value, message)
+                self.assertIn("[output truncated]", message)
+
     def test_client_secret_mode_and_error_redaction_including_timeout(self):
         secret_value = "entra-client-secret-xyz-987"
         mode = {"timeout": False}
