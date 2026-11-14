@@ -34,7 +34,8 @@ jobs:
           - os: windows-2022
           - os: macos-26
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 55
+    # The two macOS notarization submissions can each wait up to an hour at Apple.
+    timeout-minutes: ${{ matrix.os == 'macos-26' && 150 || 55 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -290,6 +291,7 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: '1'
+          MICDROP_NOTARIZATION_EVIDENCE_DIR: ${{ github.workspace }}/build/macos-notarization
         run: |
           set -euo pipefail
           rm -rf build/host build/host-dist
@@ -544,6 +546,7 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: '1'
+          MICDROP_NOTARIZATION_EVIDENCE_DIR: ${{ github.workspace }}/build/macos-notarization
         run: |
           set -euo pipefail
           rm -rf build/macos-app build/macos-app-dist build/macos-app-extracted
@@ -690,6 +693,17 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: python tools/windows_signing.py cleanup
+      - name: Retain macOS notarization failure evidence
+        if: always() && runner.os == 'macOS' && (failure() || cancelled())
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-notarization-failure
+          # Only public receipts and the submitted code archive; never signing state or keys.
+          path: |
+            build/macos-notarization/*/submission.json
+            build/macos-notarization/*/upload.zip
+          if-no-files-found: warn
+          retention-days: 14
       - name: Remove runner Apple signing material
         if: always() && runner.os == 'macOS'
         shell: bash
