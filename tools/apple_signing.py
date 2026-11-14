@@ -47,7 +47,7 @@ def _tool_display_name(str_args):
     return tool_name
 
 
-def run_tool(arguments, *, redact=(), env=None, timeout=300):
+def run_tool(arguments, *, redact=(), env=None, timeout=300, accepted_returncodes=(0,)):
     str_args = [str(a) for a in arguments]
     tool_name = _tool_display_name(str_args)
     try:
@@ -72,7 +72,7 @@ def run_tool(arguments, *, redact=(), env=None, timeout=300):
         detail = _redact(str(exc), redact)
         raise RuntimeError(f"{tool_name} could not be started: {detail}") from None
 
-    if proc.returncode != 0:
+    if proc.returncode not in accepted_returncodes:
         detail = _redact((proc.stderr or proc.stdout or "").strip(), redact)
         if len(detail) > 2000:
             detail = detail[-2000:]
@@ -399,6 +399,28 @@ def notarize_macos(target, *, staple=False):
         print(f"Notarization not configured; skipping notarization for {target}")
         return
 
+    credentials = [
+        "--key", state["api_key_path"],
+        "--key-id", state["api_key_id"],
+        "--issuer", state["api_issuer_id"],
+    ]
+    sensitive = (
+        Path(state["api_key_path"]).read_text(encoding="utf-8").strip(),
+        _clean_env("APPLE_API_PRIVATE_KEY_BASE64"),
+    )
+    evidence_root = _clean_env("MICDROP_NOTARIZATION_EVIDENCE_DIR")
+    evidence_dir = Path(evidence_root) / target.name if evidence_root else None
+    receipt = {"target": target.name, "id": "", "status": "Upload unconfirmed", "sha256": ""}
+
+    def record_status(status):
+        receipt["status"] = status
+        if evidence_dir:
+            receipt_temp = evidence_dir / "submission.json.tmp"
+            receipt_temp.write_text(
+                json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
+            )
+            receipt_temp.replace(evidence_dir / "submission.json")
+
     temp_zip_dir = Path(tempfile.mkdtemp(prefix="micdrop-notarize-", dir=state["work_dir"]))
     try:
         if target.is_file() and target.suffix == ".zip":
@@ -407,34 +429,86 @@ def notarize_macos(target, *, staple=False):
             submit_zip = temp_zip_dir / "notarize-upload.zip"
             run_tool(["ditto", "-c", "-k", "--keepParent", target, submit_zip])
 
+        if evidence_dir:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            # Preserve only the signed upload and an allowlisted receipt, never
+            # signing state or credentials. Save before waiting so a cancelled
+            # runner can retain the same bytes without creating a new submission.
+            retained_zip = evidence_dir / "upload.zip"
+            shutil.copyfile(submit_zip, retained_zip)
+            digest = hashlib.sha256()
+            with retained_zip.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            receipt["sha256"] = digest.hexdigest()
+            record_status("Upload unconfirmed")
+
         proc = run_tool(
             [
                 "xcrun",
                 "notarytool",
                 "submit",
                 submit_zip,
-                "--key",
-                state["api_key_path"],
-                "--key-id",
-                state["api_key_id"],
-                "--issuer",
-                state["api_issuer_id"],
-                "--wait",
-                "--timeout",
-                "20m",
+                *credentials,
                 "--output-format",
                 "json",
             ],
-            timeout=1300,
+            redact=sensitive,
+            timeout=600,
         )
         try:
             payload = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError("xcrun notarytool submit returned unreadable JSON") from exc
 
-        sub_id = payload.get("id", "")
-        status = payload.get("status", "")
-        print(f"Apple notarization submission {sub_id} for {target.name}: status={status}")
+        sub_id = payload.get("id", "") if isinstance(payload, dict) else ""
+        if not isinstance(sub_id, str) or not ISSUER_UUID_RE.fullmatch(sub_id):
+            raise RuntimeError("xcrun notarytool submit returned no valid submission UUID")
+        receipt["id"] = sub_id
+        record_status("Uploaded")
+        # A wait timeout does not cancel Apple's processing. Keep the upload's ID
+        # visible immediately, and wait on that same submission without reuploading.
+        print(f"Apple notarization submission {sub_id} for {target.name}: uploaded; waiting up to 60m", flush=True)
+        try:
+            proc = run_tool(
+                [
+                    "xcrun", "notarytool", "wait", sub_id, *credentials,
+                    "--timeout", "60m", "--output-format", "json",
+                ],
+                redact=sensitive,
+                timeout=3700,
+                accepted_returncodes=(0, 124),
+            )
+        except RuntimeError as exc:
+            record_status("Result unconfirmed")
+            raise RuntimeError(
+                f"Apple notarization result unconfirmed for {target.name} (id={sub_id}); "
+                f"check this submission before retrying: {exc}"
+            ) from None
+        if proc.returncode == 124:
+            record_status("In Progress")
+            raise RuntimeError(
+                f"Apple notarization still pending for {target.name} after waiting 60m (id={sub_id}); "
+                "the wait timed out, not the submission. Check this submission before retrying."
+            )
+        record_status("Result unconfirmed")
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"xcrun notarytool wait returned unreadable JSON (id={sub_id})") from exc
+        status = payload.get("status", "") if isinstance(payload, dict) else ""
+        if isinstance(payload, dict) and payload.get("id", sub_id) != sub_id:
+            raise RuntimeError(f"xcrun notarytool wait returned a different submission ID (expected {sub_id})")
+        status = _redact(str(status), sensitive)
+        record_status(status if status in ("Accepted", "Invalid", "Rejected", "In Progress") else "Result unconfirmed")
+        print(f"Apple notarization submission {sub_id} for {target.name}: status={status}", flush=True)
+        if status == "In Progress":
+            raise RuntimeError(
+                f"Apple notarization still pending for {target.name} (id={sub_id}); "
+                "check this submission before retrying."
+            )
+        if status not in ("Accepted", "Invalid", "Rejected"):
+            raise RuntimeError(f"Apple notarization returned an unknown status for {target.name} (id={sub_id})")
         if status != "Accepted":
             log_text = ""
             if sub_id:
@@ -445,18 +519,13 @@ def notarize_macos(target, *, staple=False):
                             "notarytool",
                             "log",
                             sub_id,
-                            "--key",
-                            state["api_key_path"],
-                            "--key-id",
-                            state["api_key_id"],
-                            "--issuer",
-                            state["api_issuer_id"],
+                            *credentials,
                         ],
                         capture_output=True,
                         text=True,
                         timeout=120,
                     )
-                    log_text = (log_proc.stdout or log_proc.stderr or "").strip()
+                    log_text = _redact((log_proc.stdout or log_proc.stderr or "").strip(), sensitive)
                 except (subprocess.TimeoutExpired, OSError):
                     log_text = "(timed out or failed retrieving notarytool log)"
             raise RuntimeError(
