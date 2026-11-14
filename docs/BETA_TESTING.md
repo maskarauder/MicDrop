@@ -4,8 +4,11 @@ MicDrop streams desktop audio (Windows, Linux, or macOS) to an Android phone or
 iPhone and its headphones. It can also send the phone or a supported headset
 microphone back to the computer.
 
-This is an early volunteer beta. Windows packages are Authenticode-signed, macOS
-packages are Developer ID signed and Apple-notarized, Linux packages are
+This is an early volunteer beta. When official release signing credentials are
+configured, Windows packages are Authenticode-signed and macOS packages are
+Developer ID signed and Apple-notarized (otherwise Windows is unsigned and macOS
+is ad-hoc signed — check the **Package signing** note in the release notes and
+`MicDrop-*-build.json` for your build's verified status). Linux packages are
 unsigned, Android is a sideloaded development app, and the iPhone build can be
 installed via Apple TestFlight (invite link from the maintainer) or sideloaded
 from the optional unsigned IPA with your own Apple ID. Send installation blocks

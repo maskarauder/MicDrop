@@ -36,10 +36,10 @@ Download matching desktop and phone packages from the latest release on the
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Authenticode-signed per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP |
+| **Windows 11 (x64)** | `MicDrop-*-windows-x64-setup.exe` or `MicDrop-*-windows-x64-portable.zip` | Per-user installer ([guide](docs/WINDOWS_INSTALLER.md)) or portable ZIP (Authenticode-signed when release signing is configured; see release notes) |
 | **Android 12+ (arm64)** | `MicDrop-*-android-arm64-dev.apk` | Sideload APK ([guide](docs/ANDROID.md)); same-key updates keep your pairing |
 | **iPhone (iOS 17+ arm64)** | TestFlight invite or `MicDrop-*-ios-arm64-unsigned.ipa` | Install via Apple TestFlight or sideload with your Apple ID via Sideloadly / iloader ([guide](docs/DEVELOPMENT.md#install-on-iphone)) |
-| **macOS 14.2+ (Apple Silicon arm64)** | `MicDrop-*-macos-arm64-app.zip` or `MicDrop-*-macos-arm64-host.tar.gz` | Developer ID signed & Apple-notarized experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md)); Apple Silicon hardware feedback welcome |
+| **macOS 14.2+ (Apple Silicon arm64)** | `MicDrop-*-macos-arm64-app.zip` or `MicDrop-*-macos-arm64-host.tar.gz` | Experimental AppKit `MicDrop.app` & CLI host ([guide](docs/MACOS_DESKTOP.md); Developer ID signed & Apple-notarized when configured); Apple Silicon hardware feedback welcome |
 | **Linux (x64)** | `MicDrop-*-linux-x64-host.tar.gz` | GTK3 desktop GUI & PipeWire/PulseAudio CLI host ([desktop guide](docs/LINUX_DESKTOP.md), [audio guide](docs/PLATFORM_AUDIO.md#linux-host)) and optional rendezvous service ([guide](docs/SERVICE_DEPLOYMENT.md)) |
 
 ### Setup in 4 Steps
@@ -105,15 +105,19 @@ macOS AppKit (`MicDrop.app`):
 
 ## Things to Know
 
-- **Package signing & platform prompts:** Official Windows x64 release packages
-  are **Authenticode-signed and timestamped**, though newly issued certificates
-  may still show a Windows SmartScreen download-reputation prompt on first run
-  (*More info → Run anyway*) until download reputation builds. Apple Silicon
-  macOS release packages (`MicDrop.app` and `micdrop-host`) are **Developer ID
-  signed and Apple-notarized**, while Linux x64 archives are unsigned. On mobile,
-  the Android APK is sideloaded rather than from Google Play, and the iPhone app
-  is available via **TestFlight** or by sideloading the unsigned IPA (signing
-  with a free Apple ID requires refreshing every 7 days).
+- **Package signing & platform prompts:** When cloud signing credentials are
+  configured on official `main` builds, Windows x64 packages are
+  **Authenticode-signed and timestamped** (newly issued certificates may still
+  show a Windows SmartScreen download-reputation prompt on first run—*More info
+  → Run anyway*—until download reputation builds) and Apple Silicon macOS
+  packages (`MicDrop.app` and `micdrop-host`) are **Developer ID signed and
+  Apple-notarized**; builds without those credentials remain unsigned on Windows
+  and ad-hoc signed on macOS, while Linux x64 archives are unsigned. Check each
+  release's **Package signing** note and `MicDrop-*-build.json` manifests for
+  exact verified signing status. On mobile, the Android APK is sideloaded rather
+  than from Google Play, and the iPhone app is available via **TestFlight** or
+  by sideloading the unsigned IPA (signing with a free Apple ID requires
+  refreshing every 7 days).
 - **Bluetooth audio behavior:** Bluetooth headphones add device buffering delay,
   and using a classic Bluetooth headset's microphone can switch headphone
   playback to voice call quality depending on the headset and OS.

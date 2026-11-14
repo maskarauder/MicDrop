@@ -82,8 +82,10 @@ requires exiting/uninstalling MicDrop and manually removing
 
 ## Security detections and reports
 
-Official `main`-branch and release packages are Authenticode-signed and
-timestamped (local developer and pull-request builds remain unsigned). Newly
+When Azure Artifact Signing credentials are configured, official `main`-branch
+and release packages are Authenticode-signed and timestamped (unconfigured,
+local developer, and pull-request builds remain unsigned; see the release notes
+and `MicDrop-<version>-windows-build.json` for verified status). Newly
 issued code-signing certificates still build Windows SmartScreen download
 reputation gradually, and a SmartScreen reputation prompt and an antivirus
 malware detection are different checks. If a file is flagged as malware, stop

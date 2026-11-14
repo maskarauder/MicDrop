@@ -30,10 +30,12 @@ audio driver, or change the VPS. Phone microphone return still requires a
 separately installed virtual cable. Standard installer icons and the existing
 MicDrop text branding are placeholders; no generated artwork is included.
 
-Official `main`-branch and release packages (`setup.exe`, `unins000.exe`,
-`MicDrop-maintenance.exe`, `MicDrop.exe`, and `micdrop_rtc.dll`) are
-Authenticode-signed and timestamped via Microsoft Azure Artifact Signing, while
-local developer and pull-request builds remain unsigned. Authenticode signing
+When Azure Artifact Signing credentials are configured on `main`-branch builds,
+release packages (`setup.exe`, `unins000.exe`, `MicDrop-maintenance.exe`,
+`MicDrop.exe`, and `micdrop_rtc.dll`) are Authenticode-signed and timestamped,
+while unconfigured, local developer, and pull-request builds remain unsigned
+(check the release notes and `MicDrop-<version>-windows-build.json` for verified
+status). Authenticode signing
 establishes publisher identity and satisfies Smart App Control signature checks,
 though newly issued certificates still build Windows SmartScreen download
 reputation gradually. For a reported malware detection, follow the

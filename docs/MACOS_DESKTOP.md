@@ -5,7 +5,7 @@
 ## Hardware Testing Status & Feedback Wanted
 
 > [!IMPORTANT]
-> **Apple Silicon hardware feedback requested:** `MicDrop.app` and `micdrop-host` are built, Developer ID signed with Hardened Runtime, notarized with Apple (`xcrun notarytool` + stapled ticket on `MicDrop.app` + Gatekeeper `spctl --assess` verification), and contract-tested in GitHub Actions on `macos-26` (live AppKit window/control contracts with rendered tab screenshots, and native C++ WebRTC Opus/DTLS-SRTP loopback), **but maintainer testing does not yet include physical Apple Silicon Mac hardware.**
+> **Apple Silicon hardware feedback requested:** `MicDrop.app` and `micdrop-host` are built and contract-tested in GitHub Actions on `macos-26` (live AppKit window/control contracts with rendered tab screenshots, and native C++ WebRTC Opus/DTLS-SRTP loopback). Non-PR CI runs with Apple signing/notarization credentials configured also Developer ID sign (`--options runtime --timestamp`) and Apple-notarize both packages (`xcrun notarytool` + stapled ticket on `MicDrop.app` + Gatekeeper `spctl --assess` verification; ad-hoc signed when unconfigured — check the release notes and `MicDrop-<version>-macos-build.json` for a build's verified status), **but maintainer testing does not yet include physical Apple Silicon Mac hardware.**
 >
 > If you test `MicDrop.app` or `micdrop-host` on an M-series Mac (macOS 14.2+), please share what works or fails in a [GitHub Issue](https://github.com/maskarauder/MicDrop/issues):
 > - Your macOS version, Mac chip model, and phone OS/model.
