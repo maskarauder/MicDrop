@@ -239,9 +239,11 @@ def check_ipa(path, bundle_id, minimum_os, revision=None, *,
               marketing_version=None, build_number=None, version_name=None, signed=False):
     """Raise ValueError for the first violated contract; return the IPA's SHA-256."""
     minimum = dotted(minimum_os)
-    allowed_roots = {"Payload", "Symbols", "SwiftSupport"} if signed else {"Payload"}
+    # Xcode App Store exports include SDK-origin signature receipts in Signatures/.
+    allowed_roots = {"Payload", "Symbols", "SwiftSupport", "Signatures"} if signed else {"Payload"}
     with zipfile.ZipFile(path) as package:
         items = package.infolist()
+        seen_paths = set()
         for item in items:
             name = item.filename
             parts = PurePosixPath(name).parts
@@ -253,6 +255,11 @@ def check_ipa(path, bundle_id, minimum_os, revision=None, *,
                 or parts[0] not in allowed_roots
             ):
                 raise ValueError(f"IPA entry is unsafe: {name}")
+            # PurePosixPath also normalizes repeated separators and '.' components.
+            # Reject aliases before extraction can overwrite a previously checked entry.
+            if parts in seen_paths:
+                raise ValueError(f"IPA contains a duplicate path: {name}")
+            seen_paths.add(parts)
         for item in items:
             if (item.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError(f"IPA contains a symbolic link: {item.filename}")

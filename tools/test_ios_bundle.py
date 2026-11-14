@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -182,6 +183,8 @@ class IPhoneBundleTest(unittest.TestCase):
             APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"<plist><dict/></plist>",
             APP + "embedded.mobileprovision": b"cms-profile-bytes",
             "Symbols/MicDrop.symbols": b"symbols",
+            "Signatures/": None,
+            "Signatures/WebRTC.xcframework-ios.signature": b"SDK-origin signature receipt",
         })
         self.assertRegex(self.check(signed_files, revision="local", signed=True), "^[0-9a-f]{64}$")
         for missing_key in (
@@ -192,6 +195,53 @@ class IPhoneBundleTest(unittest.TestCase):
             mutated = dict(signed_files)
             mutated[missing_key] = False
             self.rejects("Signed IPA is missing non-empty", mutated, signed=True)
+
+    def test_signed_export_signature_metadata_keeps_archive_safety_checks(self):
+        signature_name = "Signatures/WebRTC.xcframework-ios.signature"
+        signed_files = entries(**{
+            APP + "_CodeSignature/CodeResources": b"app-seal",
+            APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"framework-seal",
+            APP + "embedded.mobileprovision": b"cms-profile-bytes",
+            "Signatures/": None,
+            signature_name: b"SDK-origin signature receipt",
+        })
+        for unsafe in ("Signatures/../outside", "/Signatures/receipt", "Signatures\\receipt", "Other/receipt"):
+            with self.subTest(unsafe=unsafe):
+                self.rejects("IPA entry is unsafe", {**signed_files, unsafe: b"invalid"}, signed=True)
+        self.rejects("IPA contains a symbolic link", signed_files,
+                     symlinks=[("Signatures/link", "/etc/passwd")], signed=True)
+
+        # Receipts count toward the same total uncompressed-size limit as Payload/.
+        payload_size = sum(len(value) for name, value in signed_files.items()
+                           if isinstance(value, bytes) and not name.startswith("Signatures/"))
+        with patch("check_ios_bundle.MAX_UNCOMPRESSED", payload_size):
+            self.rejects("IPA is unexpectedly large", signed_files, signed=True)
+
+        # Unsigned sideload packages must still contain only Payload/.
+        self.rejects("IPA entry is unsafe: Signatures/", entries(**{
+            "Signatures/": None, signature_name: b"SDK-origin signature receipt",
+        }))
+
+    def test_signed_export_rejects_duplicate_and_aliased_metadata_paths(self):
+        signature_name = "Signatures/WebRTC.xcframework-ios.signature"
+        signed_files = entries(**{
+            APP + "_CodeSignature/CodeResources": b"app-seal",
+            APP + "Frameworks/WebRTC.framework/_CodeSignature/CodeResources": b"framework-seal",
+            APP + "embedded.mobileprovision": b"cms-profile-bytes",
+            signature_name: b"SDK-origin signature receipt",
+        })
+        for alias in (signature_name, "Signatures/./WebRTC.xcframework-ios.signature",
+                      "Signatures//WebRTC.xcframework-ios.signature"):
+            with self.subTest(alias=alias):
+                ipa = self.write(signed_files)
+                with zipfile.ZipFile(ipa, "a") as package:
+                    if alias == signature_name:
+                        with self.assertWarns(UserWarning):
+                            package.writestr(alias, b"replacement")
+                    else:
+                        package.writestr(alias, b"replacement")
+                with self.assertRaisesRegex(ValueError, "IPA contains a duplicate path"):
+                    check_ipa(ipa, "com.maskarauder.micdrop", "17.0", signed=True)
 
     def test_export_compliance_app_icon_and_privacy_manifest_are_required(self):
         self.rejects("ITSAppUsesNonExemptEncryption must be false",
