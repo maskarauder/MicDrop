@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -25,6 +26,10 @@ import (
 )
 
 var linuxMainThread = make(chan func(), 4)
+
+// Cold GTK startup, including session/accessibility-bus setup, can exceed ten
+// seconds on headless CI before the first window is ready.
+const linuxWindowStartupTimeout = 45 * time.Second
 
 func init() {
 	runtime.LockOSThread()
@@ -157,15 +162,6 @@ func TestLinuxDesktopControls(t *testing.T) {
 		finished <- runWindow(backend, directory, true, true)
 	}
 
-	var emit func(Event)
-	select {
-	case emit = <-started:
-	case err := <-finished:
-		t.Fatalf("Linux desktop window did not start: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Linux desktop window startup timed out")
-	}
-
 	uiDo := func(fn func()) {
 		done := make(chan struct{})
 		uiTestQueue <- func() {
@@ -203,8 +199,16 @@ func TestLinuxDesktopControls(t *testing.T) {
 		uiDo(func() { triggerControlForTest(id, 0) })
 	}
 
+	exited := false
 	defer func() {
-		uiDo(func() { triggerControlForTest(idExit, 0) })
+		if exited {
+			return
+		}
+		uiDo(func() {
+			if activeWindow != nil && activeWindow.directory == directory {
+				triggerControlForTest(idExit, 0)
+			}
+		})
 		select {
 		case err := <-finished:
 			if err != nil {
@@ -214,6 +218,16 @@ func TestLinuxDesktopControls(t *testing.T) {
 			t.Error("Linux desktop Quit did not finish cleanup")
 		}
 	}()
+
+	var emit func(Event)
+	select {
+	case emit = <-started:
+	case err := <-finished:
+		exited = true
+		t.Fatalf("Linux desktop window did not start: %v", err)
+	case <-time.After(linuxWindowStartupTimeout):
+		t.Fatal("Linux desktop window startup timed out")
+	}
 
 	wait := func(condition func() bool) {
 		t.Helper()
@@ -527,6 +541,8 @@ func TestLinuxDesktopGracefulQuitWaitsForControllerStop(t *testing.T) {
 	started := make(chan struct{}, 1)
 	stopping := make(chan struct{}, 1)
 	allowStop := make(chan struct{})
+	releaseStop := sync.OnceFunc(func() { close(allowStop) })
+	defer releaseStop()
 	finished := make(chan error, 1)
 
 	backend := Backend{
@@ -555,14 +571,6 @@ func TestLinuxDesktopGracefulQuitWaitsForControllerStop(t *testing.T) {
 		finished <- runWindow(backend, directory, true, true)
 	}
 
-	select {
-	case <-started:
-	case err := <-finished:
-		t.Fatalf("Linux desktop window did not start: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Linux desktop startup timed out")
-	}
-
 	uiDo := func(fn func()) {
 		done := make(chan struct{})
 		uiTestQueue <- func() {
@@ -575,6 +583,36 @@ func TestLinuxDesktopGracefulQuitWaitsForControllerStop(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out dispatching onto GTK main thread")
 		}
+	}
+
+	// Register cleanup before waiting for startup. A failed assertion must not
+	// leave the GTK thread blocked on this test's deliberate backend stop gate.
+	exited := false
+	defer func() {
+		releaseStop()
+		if exited {
+			return
+		}
+		uiDo(func() {
+			if activeWindow != nil && activeWindow.directory == directory {
+				activeWindow.requestQuit.Store(true)
+				activeWindow.tick()
+			}
+		})
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("graceful-quit fixture did not finish cleanup")
+		}
+	}()
+
+	select {
+	case <-started:
+	case err := <-finished:
+		exited = true
+		t.Fatalf("Linux desktop window did not start: %v", err)
+	case <-time.After(linuxWindowStartupTimeout):
+		t.Fatal("Linux desktop startup timed out")
 	}
 
 	uiDo(func() {
@@ -592,13 +630,15 @@ func TestLinuxDesktopGracefulQuitWaitsForControllerStop(t *testing.T) {
 
 	select {
 	case err := <-finished:
+		exited = true
 		t.Fatalf("runWindow exited before controller finished stopping: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	close(allowStop)
+	releaseStop()
 	select {
 	case err := <-finished:
+		exited = true
 		if err != nil {
 			t.Fatalf("unexpected error from runWindow: %v", err)
 		}
@@ -847,7 +887,7 @@ func TestLinuxDesktopQuitDismissesOpenGTKDialogs(t *testing.T) {
 		case <-started:
 		case err := <-finished:
 			t.Fatalf("runWindow failed to start: %v", err)
-		case <-time.After(10 * time.Second):
+		case <-time.After(linuxWindowStartupTimeout):
 			t.Fatal("runWindow startup timed out")
 		}
 
@@ -962,7 +1002,7 @@ func TestLinuxDesktopQuitDismissesOpenGTKDialogs(t *testing.T) {
 			case err := <-finished:
 				exited = true
 				t.Fatalf("runWindow exited early: %v", err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(linuxWindowStartupTimeout):
 				t.Fatal("runWindow did not reach initial device refresh")
 			}
 
@@ -1282,7 +1322,7 @@ func TestLinuxDesktopTrayHostAvailabilityFallback(t *testing.T) {
 		case <-started:
 		case err := <-finished:
 			t.Fatalf("runWindow failed to start: %v", err)
-		case <-time.After(10 * time.Second):
+		case <-time.After(linuxWindowStartupTimeout):
 			t.Fatal("runWindow startup timed out")
 		}
 
@@ -1331,7 +1371,7 @@ func TestLinuxDesktopTrayHostAvailabilityFallback(t *testing.T) {
 		case <-started:
 		case err := <-finished:
 			t.Fatalf("runWindow failed to start: %v", err)
-		case <-time.After(10 * time.Second):
+		case <-time.After(linuxWindowStartupTimeout):
 			t.Fatal("runWindow startup timed out")
 		}
 
@@ -1380,7 +1420,7 @@ func TestLinuxDesktopTrayHostAvailabilityFallback(t *testing.T) {
 		case <-started:
 		case err := <-finished:
 			t.Fatalf("runWindow failed to start: %v", err)
-		case <-time.After(10 * time.Second):
+		case <-time.After(linuxWindowStartupTimeout):
 			t.Fatal("runWindow startup timed out")
 		}
 
@@ -1504,7 +1544,7 @@ func TestLinuxDesktopDialogRepeatedOpenCloseFinalizesObjects(t *testing.T) {
 	case <-devicesReady:
 	case err := <-finished:
 		t.Fatalf("runWindow exited early: %v", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(linuxWindowStartupTimeout):
 		t.Fatal("runWindow did not reach initial device refresh")
 	}
 
@@ -1642,7 +1682,7 @@ func TestLinuxDesktopTrayCleanupDestroysMenuBeforeIndicator(t *testing.T) {
 		case <-started:
 		case err := <-finished:
 			t.Fatalf("cycle %d: runWindow failed to start: %v", cycle, err)
-		case <-time.After(10 * time.Second):
+		case <-time.After(linuxWindowStartupTimeout):
 			t.Fatalf("cycle %d: runWindow startup timed out", cycle)
 		}
 
