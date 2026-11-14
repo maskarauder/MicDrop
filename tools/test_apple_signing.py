@@ -31,6 +31,7 @@ FAKE_P8_B64 = base64.b64encode(
 API_KEY_ID = "KEY1234567"
 API_ISSUER_ID = "11111111-2222-3333-4444-555555555555"
 PROFILE_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+NOTARY_SUBMISSION_ID = "12345678-1234-4321-abcd-0123456789ab"
 
 
 def make_profile_plist(
@@ -277,7 +278,11 @@ class AppleSigningTests(unittest.TestCase):
                 out = f'  1) {DEV_ID_SHA1} "Developer ID Application: Noah Seymour ({TEAM_ID})"\n'
                 return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
             if cmd[:3] == ["xcrun", "notarytool", "submit"]:
-                out = json.dumps({"id": "sub-uuid-1234", "status": notarize_status["value"]})
+                out = json.dumps({"id": NOTARY_SUBMISSION_ID, "message": "Successfully uploaded file"})
+                return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+            if cmd[:3] == ["xcrun", "notarytool", "wait"]:
+                self.assertEqual(cmd[3], NOTARY_SUBMISSION_ID)
+                out = json.dumps({"id": NOTARY_SUBMISSION_ID, "status": notarize_status["value"]})
                 return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
             if cmd[:3] == ["xcrun", "notarytool", "log"]:
                 return subprocess.CompletedProcess(args, 0, stdout='{"issues":[{"message":"unsigned nested binary"}]}', stderr="")
@@ -325,6 +330,113 @@ class AppleSigningTests(unittest.TestCase):
 
             signing.cleanup()
             self.assertFalse(Path(state["work_dir"]).exists())
+
+        submits = [cmd for cmd in calls if cmd[:3] == ["xcrun", "notarytool", "submit"]]
+        waits = [cmd for cmd in calls if cmd[:3] == ["xcrun", "notarytool", "wait"]]
+        self.assertEqual(len(submits), 2)
+        self.assertEqual(len(waits), 2)
+        self.assertTrue(all("--wait" not in cmd for cmd in submits))
+        self.assertTrue(all(cmd[cmd.index("--timeout") + 1] == "60m" for cmd in waits))
+
+    def test_notary_wait_keeps_one_submission_and_safe_exact_byte_evidence(self):
+        target = self.base / "MicDrop.zip"
+        archive = b"exact signed payload bytes for notarization"
+        target.write_bytes(archive)
+        key_path = self.base / "AuthKey.p8"
+        key_text = "-----BEGIN PRIVATE KEY-----\nprivate-test-key\n-----END PRIVATE KEY-----"
+        key_path.write_text(key_text, encoding="utf-8")
+        key_b64 = base64.b64encode(key_text.encode()).decode("ascii")
+        evidence_root = self.base / "evidence"
+        evidence_dir = evidence_root / target.name
+        state = {
+            "notarized": True,
+            "work_dir": str(self.runner_temp),
+            "api_key_path": str(key_path),
+            "api_key_id": API_KEY_ID,
+            "api_issuer_id": API_ISSUER_ID,
+        }
+        cases = (
+            ("accepted", None, "Accepted"),
+            ("invalid", "(?s)rejected.*unsigned nested binary", "Invalid"),
+            ("timeout", "still pending.*60m", "In Progress"),
+            ("pending", "still pending", "In Progress"),
+            ("process_timeout", "result unconfirmed.*timed out", "Result unconfirmed"),
+            ("wait_failure", "result unconfirmed.*failed", "Result unconfirmed"),
+            ("unknown", "unknown status", "Result unconfirmed"),
+            ("mismatched_id", "different submission ID", "Result unconfirmed"),
+            ("malformed_result", "unreadable JSON", "Result unconfirmed"),
+        )
+        for case, error_pattern, expected_status in cases:
+            calls = []
+            stdout = io.StringIO()
+
+            def fake_run(args, **kwargs):
+                cmd = [str(a) for a in args]
+                calls.append(cmd)
+                if cmd[:3] == ["xcrun", "notarytool", "submit"]:
+                    self.assertNotIn("--wait", cmd)
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"id": NOTARY_SUBMISSION_ID}), stderr="")
+                if cmd[:3] == ["xcrun", "notarytool", "wait"]:
+                    self.assertEqual(cmd[3], NOTARY_SUBMISSION_ID)
+                    self.assertEqual(kwargs["timeout"], 3700)
+                    self.assertEqual(cmd[cmd.index("--timeout") + 1], "60m")
+                    # The UUID and exact upload must already be persisted before
+                    # waiting, including if a runner is killed during this call.
+                    self.assertIn(NOTARY_SUBMISSION_ID, stdout.getvalue())
+                    prior = json.loads((evidence_dir / "submission.json").read_text())
+                    self.assertEqual(prior["id"], NOTARY_SUBMISSION_ID)
+                    self.assertEqual(prior["status"], "Uploaded")
+                    self.assertEqual((evidence_dir / "upload.zip").read_bytes(), archive)
+                    if case == "process_timeout":
+                        raise subprocess.TimeoutExpired(cmd, 3700, output=key_text.encode(), stderr=key_b64.encode())
+                    if case == "wait_failure":
+                        return subprocess.CompletedProcess(args, 1, stdout="", stderr=f"failed {key_text} {key_b64}")
+                    if case == "malformed_result":
+                        return subprocess.CompletedProcess(args, 0, stdout="not JSON", stderr="")
+                    status = {"accepted": "Accepted", "invalid": "Invalid", "unknown": "Unexpected"}.get(case, "In Progress")
+                    wait_id = PROFILE_UUID if case == "mismatched_id" else NOTARY_SUBMISSION_ID
+                    return subprocess.CompletedProcess(
+                        args, 124 if case == "timeout" else 0,
+                        stdout=json.dumps({"id": wait_id, "status": status}),
+                        stderr=key_text if case == "timeout" else "",
+                    )
+                if cmd[:3] == ["xcrun", "notarytool", "log"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=f"unsigned nested binary {key_text} {key_b64}", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with self.subTest(case=case), patch.dict(
+                os.environ,
+                {"MICDROP_NOTARIZATION_EVIDENCE_DIR": str(evidence_root), "APPLE_API_PRIVATE_KEY_BASE64": key_b64},
+                clear=True,
+            ), patch.object(signing, "_load_state", return_value=state), patch("subprocess.run", side_effect=fake_run), patch("sys.stdout", stdout):
+                error_text = ""
+                if error_pattern:
+                    with self.assertRaisesRegex(RuntimeError, error_pattern) as exc:
+                        signing.notarize_macos(target, staple=True)
+                    error_text = str(exc.exception)
+                    self.assertIn(NOTARY_SUBMISSION_ID, error_text)
+                else:
+                    signing.notarize_macos(target, staple=True)
+
+                receipt_text = (evidence_dir / "submission.json").read_text()
+                receipt = json.loads(receipt_text)
+                self.assertEqual(receipt, {
+                    "target": target.name, "id": NOTARY_SUBMISSION_ID,
+                    "status": expected_status, "sha256": hashlib.sha256(archive).hexdigest(),
+                })
+                self.assertEqual((evidence_dir / "upload.zip").read_bytes(), archive)
+                self.assertEqual(sorted(p.name for p in evidence_dir.iterdir()), ["submission.json", "upload.zip"])
+                for secret in (key_text, key_b64, str(key_path), API_KEY_ID, API_ISSUER_ID):
+                    self.assertNotIn(secret, receipt_text)
+                for secret in (key_text, key_b64):
+                    self.assertNotIn(secret, error_text + stdout.getvalue())
+                self.assertEqual(sum(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in calls), 1)
+                self.assertEqual(sum(cmd[:3] == ["xcrun", "notarytool", "wait"] for cmd in calls), 1)
+                staple_calls = [cmd for cmd in calls if cmd[:2] == ["xcrun", "stapler"]]
+                self.assertEqual(len(staple_calls), 2 if case == "accepted" else 0)
+                log_calls = [cmd for cmd in calls if cmd[:3] == ["xcrun", "notarytool", "log"]]
+                self.assertEqual(len(log_calls), 1 if case == "invalid" else 0)
+                self.assertEqual(list(self.runner_temp.iterdir()), [])
 
     def test_ios_prepare_export_options_testflight_upload_and_cleanup(self):
         calls = []
