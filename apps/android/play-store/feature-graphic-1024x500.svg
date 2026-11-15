@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="500" viewBox="0 0 1024 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="stageGlow" cx="0.76" cy="0.50" r="0.46">
+      <stop offset="0%" stop-color="#293543"/>
+      <stop offset="65%" stop-color="#202831"/>
+      <stop offset="100%" stop-color="#1B222A"/>
+    </radialGradient>
+    <linearGradient id="cardSurface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2B3744"/>
+      <stop offset="100%" stop-color="#232D38"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Opaque slate canvas -->
+  <rect width="1024" height="500" fill="url(#stageGlow)"/>
+
+  <!-- Architectural top & bottom frame lines -->
+  <line x1="0" y1="58" x2="1024" y2="58" stroke="#313E4C" stroke-width="1"/>
+  <line x1="0" y1="444" x2="1024" y2="444" stroke="#313E4C" stroke-width="1"/>
+
+  <!-- Top bar brand header -->
+  <circle cx="76" cy="30" r="11" fill="#2A3541" stroke="#455566" stroke-width="1"/>
+  <rect x="73.5" y="23.5" width="5" height="8" rx="2.5" fill="#D4AC45"/>
+  <path d="M71.5 29.5 A4.5 4.5 0 0 0 80.5 29.5" stroke="#E9EEF2" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="76" y1="34" x2="76" y2="37" stroke="#E9EEF2" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="96" y="36" fill="#E9EEF2" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="19" font-weight="700" letter-spacing="-0.4">MicDrop</text>
+  <text x="956" y="35" text-anchor="end" fill="#8F9EAE" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="11" letter-spacing="2">MASKARAUDER.COM</text>
+
+  <!-- Left column: Eyebrow -->
+  <rect x="68" y="114" width="7" height="7" rx="1" fill="#D4AC45"/>
+  <text x="84" y="122" fill="#BDC8D2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="12" letter-spacing="2.2">WIRELESS AUDIO · BOTH WAYS</text>
+
+  <!-- Left column: Two-line Display Headline -->
+  <text x="66" y="198" fill="#E9EEF2" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="56" font-weight="700" letter-spacing="-1.8">PC audio out.</text>
+  <text x="66" y="264" fill="#D4AC45" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="56" font-weight="700" letter-spacing="-1.8">Phone mic back.</text>
+
+  <!-- Left column: Concise supporting copy -->
+  <text x="68" y="320" fill="#D5DEE6" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="18">Listen through your phone and headphones over Wi-Fi.</text>
+  <text x="68" y="348" fill="#9FB0C0" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="16.5">Send your mic to Discord, OBS, and desktop apps.</text>
+
+  <!-- Left column: Feature chips (clean architectural tags) -->
+  <rect x="68" y="376" width="128" height="28" rx="5" fill="#26313D" stroke="#3B4958" stroke-width="1"/>
+  <text x="132" y="394" text-anchor="middle" fill="#E9EEF2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="11" letter-spacing="0.6">LOCAL WI-FI</text>
+
+  <rect x="206" y="376" width="144" height="28" rx="5" fill="#26313D" stroke="#3B4958" stroke-width="1"/>
+  <text x="278" y="394" text-anchor="middle" fill="#E9EEF2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="11" letter-spacing="0.6">HEADSET &amp; USB</text>
+
+  <rect x="360" y="376" width="152" height="28" rx="5" fill="#26313D" stroke="#3B4958" stroke-width="1"/>
+  <text x="436" y="394" text-anchor="middle" fill="#E9EEF2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="11" letter-spacing="0.6">DTLS ENCRYPTED</text>
+
+  <!-- Right visual stage: concentric acoustic rings -->
+  <circle cx="786" cy="250" r="158" stroke="#2B3846" stroke-width="1.2"/>
+  <circle cx="786" cy="250" r="120" stroke="#314050" stroke-width="1.2"/>
+  <circle cx="786" cy="250" r="82" stroke="#38495B" stroke-width="1.2"/>
+
+  <!-- Desktop Monitor Node (left of stage) -->
+  <rect x="606" y="186" width="108" height="76" rx="8" fill="url(#cardSurface)" stroke="#687C91" stroke-width="2"/>
+  <rect x="614" y="194" width="92" height="60" rx="4" fill="#171E26"/>
+  <line x1="660" y1="262" x2="660" y2="282" stroke="#687C91" stroke-width="3" stroke-linecap="round"/>
+  <line x1="638" y1="282" x2="682" y2="282" stroke="#687C91" stroke-width="3" stroke-linecap="round"/>
+  <!-- Desktop waveform bars -->
+  <line x1="632" y1="228" x2="632" y2="220" stroke="#D4AC45" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="642" y1="234" x2="642" y2="214" stroke="#D4AC45" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="652" y1="241" x2="652" y2="207" stroke="#E9EEF2" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="662" y1="232" x2="662" y2="216" stroke="#D4AC45" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="672" y1="239" x2="672" y2="209" stroke="#E9EEF2" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="682" y1="233" x2="682" y2="215" stroke="#D4AC45" stroke-width="3.2" stroke-linecap="round"/>
+  <line x1="692" y1="227" x2="692" y2="221" stroke="#D4AC45" stroke-width="3.2" stroke-linecap="round"/>
+  <text x="660" y="308" text-anchor="middle" fill="#9FB0C0" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="10.5" letter-spacing="1.5">PC HOST</text>
+
+  <!-- Bidirectional Stream Paths -->
+  <!-- Top path: PC -> Phone -->
+  <path d="M722 192 C758 164, 814 164, 850 192" stroke="#D4AC45" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M843 183 L851 192.5 L840 194.5" stroke="#D4AC45" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="786" y="160" text-anchor="middle" fill="#D4AC45" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="10.5" font-weight="700" letter-spacing="1.3">DESKTOP AUDIO</text>
+
+  <!-- Bottom path: Phone -> PC -->
+  <path d="M850 308 C814 336, 758 336, 722 308" stroke="#E9EEF2" stroke-width="2.2" stroke-dasharray="5 5" stroke-linecap="round"/>
+  <path d="M729 317 L721 307.5 L732 305.5" stroke="#E9EEF2" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="786" y="349" text-anchor="middle" fill="#BDC8D2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="10.5" letter-spacing="1.3">MIC RETURN</text>
+
+  <!-- Center MicDrop Canonical Emblem -->
+  <circle cx="786" cy="250" r="46" fill="#202831" stroke="#465769" stroke-width="1.5"/>
+  <circle cx="786" cy="250" r="39" fill="#2A3541" stroke="#D4AC45" stroke-width="1.5" stroke-opacity="0.65"/>
+  <!-- Canonical mic inside emblem: center (786, 250), scale 3.1x of 24x24 Material grid centered at (12, 13) -->
+  <!-- Gold capsule: center x=786, top=250 - 9*3.1=222.1, height=12*3.1=37.2, width=6*3.1=18.6, rx=9.3 -->
+  <rect x="776.7" y="220.5" width="18.6" height="37.2" rx="9.3" fill="#D4AC45"/>
+  <!-- Silver half-ring: center (786, 248.4), r=6*3.1=18.6, stroke-width=2*3.1=6.2 -->
+  <path d="M767.4 248.4 A18.6 18.6 0 0 0 804.6 248.4" stroke="#E9EEF2" stroke-width="6.2" stroke-linecap="butt"/>
+  <!-- Silver stem -->
+  <rect x="782.9" y="265.5" width="6.2" height="14.0" fill="#E9EEF2"/>
+
+  <!-- Android Phone Node (right of stage) -->
+  <rect x="862" y="166" width="88" height="166" rx="15" fill="url(#cardSurface)" stroke="#7B90A6" stroke-width="2"/>
+  <rect x="870" y="177" width="72" height="144" rx="9" fill="#171E26"/>
+  <!-- Earpiece / camera -->
+  <line x1="896" y1="185" x2="916" y2="185" stroke="#4D5F73" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Phone active badge -->
+  <circle cx="906" cy="233" r="21" fill="#24303C" stroke="#D4AC45" stroke-width="1.8"/>
+  <polygon points="902,224 915,233 902,242" fill="#D4AC45"/>
+  <!-- Phone mic status bar -->
+  <rect x="882" y="272" width="48" height="20" rx="5" fill="#232E3A" stroke="#425466" stroke-width="1"/>
+  <circle cx="892" cy="282" r="3.2" fill="#D4AC45"/>
+  <text x="911" y="285.5" text-anchor="middle" fill="#E9EEF2" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="8.5" font-weight="700">LIVE</text>
+  <!-- Bottom gesture bar -->
+  <line x1="894" y1="313" x2="918" y2="313" stroke="#4D5F73" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="906" y="352" text-anchor="middle" fill="#9FB0C0" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="10.5" letter-spacing="1.5">ANDROID</text>
+
+  <!-- Accent signal dot -->
+  <circle cx="914" cy="144" r="4.5" fill="#D4AC45"/>
+
+  <!-- Bottom bar metadata -->
+  <text x="68" y="476" fill="#8F9EAE" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="12" letter-spacing="1.4">OPEN SOURCE (MPL-2.0) · NO ACCOUNT · ANDROID 12+</text>
+  <text x="956" y="476" text-anchor="end" fill="#D4AC45" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="12" letter-spacing="1.2">WINDOWS · MACOS · LINUX</text>
+</svg>
