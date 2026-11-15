@@ -173,6 +173,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_apple_signing.py' -v
           python -m unittest discover -s tools -p 'test_windows_signing.py' -v
           python -m unittest discover -s tools -p 'test_android_signing.py' -v
+          python -m unittest discover -s tools -p 'test_ci_apt_install.py' -v
           python tools/generate_apple_icons.py check
           python tools/play_store_graphics.py check
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
@@ -224,34 +225,12 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xauth >/dev/null 2>&1 || ! ldconfig -p | grep -q 'libgtk-3\.so\.0'; then
-            if [ -f /etc/apt/apt-mirrors.txt ]; then
-              for mirror in \
-                "https://mirrors.edge.kernel.org/ubuntu/" \
-                "https://ftp.osuosl.org/pub/ubuntu/" \
-                "http://azure.archive.ubuntu.com/ubuntu/" \
-                "https://archive.ubuntu.com/ubuntu/"; do
-                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
-                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
-                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-                  break
-                fi
-              done
-            fi
-            APT_OPTS=(
-              -o Acquire::ForceIPv4=true
-              -o Acquire::Retries=1
-              -o Acquire::http::Timeout=5
-              -o Acquire::https::Timeout=5
-              -o Acquire::http::No-Cache=false
-              -o Acquire::https::No-Cache=false
-            )
-            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
+            bash tools/ci_apt_install.sh update
             GTK_PKG="libgtk-3-0t64"
             if ! apt-cache show "$GTK_PKG" >/dev/null 2>&1; then
               GTK_PKG="libgtk-3-0"
             fi
-            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
-              xvfb xauth fonts-dejavu-core adwaita-icon-theme "$GTK_PKG"
+            bash tools/ci_apt_install.sh install xvfb xauth fonts-dejavu-core adwaita-icon-theme "$GTK_PKG"
           fi
           G_DEBUG=fatal-criticals xvfb-run -a -s "-screen 0 1280x960x24" go test -count=1 -v ./internal/desktop
       - name: Retain Linux desktop UI preview
@@ -311,7 +290,6 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: '1'
-          MICDROP_NOTARIZATION_EVIDENCE_DIR: ${{ github.workspace }}/build/macos-notarization
         run: |
           set -euo pipefail
           rm -rf build/host build/host-dist
@@ -324,10 +302,6 @@ jobs:
             cp .deps/webrtc/macos/webrtc/NOTICE build/host/WEBRTC-NOTICE.txt
             cp .deps/webrtc/macos/webrtc/VERSIONS build/host/WEBRTC-VERSIONS.txt
             python3 tools/apple_signing.py sign-macos build/host/libmicdrop_rtc.dylib build/host/micdrop-host
-            mkdir -p build/host-notarize
-            cp build/host/libmicdrop_rtc.dylib build/host/micdrop-host build/host-notarize/
-            python3 tools/apple_signing.py notarize-macos build/host-notarize
-            rm -rf build/host-notarize
             python3 tools/package_unix_host.py package \
               --platform macos-arm64 \
               --stage-dir build/host \
@@ -393,29 +367,7 @@ jobs:
           HOST_BIN="./build/host-extracted/MicDrop-linux-x64-host/micdrop-host"
           test -x "$HOST_BIN"
           if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v pactl >/dev/null 2>&1; then
-            if [ -f /etc/apt/apt-mirrors.txt ]; then
-              for mirror in \
-                "https://mirrors.edge.kernel.org/ubuntu/" \
-                "https://ftp.osuosl.org/pub/ubuntu/" \
-                "http://azure.archive.ubuntu.com/ubuntu/" \
-                "https://archive.ubuntu.com/ubuntu/"; do
-                if curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble/InRelease" >/dev/null 2>&1 && \
-                   curl -4 -fsSLI --connect-timeout 3 --max-time 5 "${mirror}dists/noble-security/InRelease" >/dev/null 2>&1; then
-                  printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-                  break
-                fi
-              done
-            fi
-            APT_OPTS=(
-              -o Acquire::ForceIPv4=true
-              -o Acquire::Retries=1
-              -o Acquire::http::Timeout=5
-              -o Acquire::https::Timeout=5
-              -o Acquire::http::No-Cache=false
-              -o Acquire::https::No-Cache=false
-            )
-            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" update
-            DEBIAN_FRONTEND=noninteractive sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends pulseaudio pulseaudio-utils
+            bash tools/ci_apt_install.sh install pulseaudio pulseaudio-utils
           fi
           PA_DIR="$RUNNER_TEMP/micdrop-pulse"
           mkdir -m 700 -p "$PA_DIR/runtime" "$PA_DIR/state"
@@ -551,16 +503,6 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: python3 tools/draft_release.py stage --platform linux --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
-      - name: Retain macOS CLI host
-        if: runner.os == 'macOS'
-        uses: ./.github/actions/store-artifact
-        with:
-          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
-          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-          name: macos-arm64-host
-          path: build/host-dist/MicDrop-macos-arm64-host.tar.gz
-          if-no-files-found: error
-          retention-days: 14
       - name: Build, sign, and verify macOS desktop app bundle
         if: runner.os == 'macOS'
         shell: bash
@@ -569,8 +511,8 @@ jobs:
           MICDROP_NOTARIZATION_EVIDENCE_DIR: ${{ github.workspace }}/build/macos-notarization
         run: |
           set -euo pipefail
-          rm -rf build/macos-app build/macos-app-dist build/macos-app-extracted
-          mkdir -p build/macos-app build/macos-app-dist build/macos-app-extracted
+          rm -rf build/macos-app build/macos-app-dist build/macos-app-extracted build/macos-notarize
+          mkdir -p build/macos-app build/macos-app-dist build/macos-app-extracted build/macos-notarize/cli
           go build -trimpath -o build/macos-app/MicDrop-bin ./apps/windows-host
           python3 tools/macos_app_bundle.py build \
             --executable build/macos-app/MicDrop-bin \
@@ -582,7 +524,17 @@ jobs:
           python3 tools/apple_signing.py sign-macos \
             build/macos-app/MicDrop.app/Contents/Frameworks/libmicdrop_rtc.dylib \
             build/macos-app/MicDrop.app
-          python3 tools/apple_signing.py notarize-macos build/macos-app/MicDrop.app --staple
+          # Submit MicDrop.app and the standalone CLI Mach-O binaries together in a single
+          # Apple notarization pass so macOS CI waits once (~25-30m) instead of twice (~60m),
+          # then staple the ticket directly onto build/macos-app/MicDrop.app.
+          ditto build/macos-app/MicDrop.app build/macos-notarize/MicDrop.app
+          cp build/host-extracted/MicDrop-macos-arm64-host/libmicdrop_rtc.dylib \
+            build/host-extracted/MicDrop-macos-arm64-host/micdrop-host \
+            build/macos-notarize/cli/
+          caffeinate -dims python3 tools/apple_signing.py notarize-macos \
+            build/macos-notarize \
+            --staple-path build/macos-app/MicDrop.app
+          rm -rf build/macos-notarize
           python3 tools/macos_app_bundle.py zip \
             --app build/macos-app/MicDrop.app \
             --output build/macos-app-dist/MicDrop-macos-arm64-app.zip
@@ -594,6 +546,16 @@ jobs:
           ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop version
           ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop doctor
           ./build/macos-app-extracted/MicDrop.app/Contents/MacOS/MicDrop rtc-check
+      - name: Retain macOS CLI host
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          name: macos-arm64-host
+          path: build/host-dist/MicDrop-macos-arm64-host.tar.gz
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain macOS desktop app
         if: runner.os == 'macOS'
         uses: ./.github/actions/store-artifact
@@ -713,6 +675,16 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: python tools/windows_signing.py cleanup
+      - name: Wait briefly for runner network recovery before uploading failure evidence
+        if: always() && runner.os == 'macOS' && (failure() || cancelled())
+        shell: bash
+        run: |
+          for _ in 1 2 3 4 5; do
+            if curl -fsSI --connect-timeout 3 --max-time 5 https://github.com >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 3
+          done
       - name: Retain macOS notarization failure evidence
         if: always() && runner.os == 'macOS' && (failure() || cancelled())
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -745,8 +717,7 @@ jobs:
         run: go test -race ./internal/rendezvous ./services/signaling
       - name: Validate Caddy certificate permissions and renewal
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes acl
+          bash tools/ci_apt_install.sh install acl
           bash -n deploy/systemd/install.sh
           sudo python3 -B -m unittest discover -s deploy/systemd -p 'test_*.py' -v
       - name: Build standalone rendezvous
