@@ -154,16 +154,22 @@ final class SessionSignalingRetryTests: XCTestCase {
                 controller?.close(.user)
             }
         }
+        let caught = Locked<Error?>(nil)
         let done = expectation(description: "status loop stopped")
         Thread {
             // A worker-wide pool alone must not satisfy the between-iteration assertion.
             autoreleasepool {
-                XCTAssertThrowsError(try controller.statusLoop()) { XCTAssertTrue($0 is SessionStopped) }
+                do {
+                    try controller.statusLoop()
+                } catch {
+                    caught.value = error
+                }
                 releasedOnReturn.value = released.value
             }
             done.fulfill()
         }.start()
         wait(for: [done], timeout: 5)
+        XCTAssertTrue(caught.value is SessionStopped)
         XCTAssertEqual(allocated.value, 40)
         XCTAssertGreaterThan(releasedBeforeStop.value, 0, "temporary objects must drain while the stream is running")
         XCTAssertEqual(releasedOnReturn.value, allocated.value, "Stop must also drain the throwing iteration")
