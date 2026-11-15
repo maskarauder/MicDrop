@@ -172,9 +172,11 @@ def prepare():
 
 def prepare_release():
     encoded = "".join(os.environ.get("MICDROP_ANDROID_UPLOAD_KEYSTORE_BASE64", "").split())
-    store_password = os.environ.get("MICDROP_ANDROID_UPLOAD_STORE_PASSWORD", "").strip()
+    # Password whitespace is significant to keytool and Gradle; only normalize
+    # the base64 transport and alias, never the secret values themselves.
+    store_password = os.environ.get("MICDROP_ANDROID_UPLOAD_STORE_PASSWORD", "")
     key_alias = os.environ.get("MICDROP_ANDROID_UPLOAD_KEY_ALIAS", "").strip()
-    key_password = os.environ.get("MICDROP_ANDROID_UPLOAD_KEY_PASSWORD", "").strip()
+    key_password = os.environ.get("MICDROP_ANDROID_UPLOAD_KEY_PASSWORD", "")
 
     required = {
         "MICDROP_ANDROID_UPLOAD_KEYSTORE_BASE64": bool(encoded),

@@ -168,6 +168,52 @@ class AndroidSigningTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Incomplete Android upload signing"):
                 android_signing.prepare_release()
 
+    def test_prepare_release_preserves_password_whitespace(self):
+        ks = self.root / "whitespace-upload.jks"
+        store_password = " StoreSecret#2026! "
+        key_password = "\t KeySecret#2026!\t "
+        child_env = os.environ.copy()
+        child_env.update(STORE_PW=store_password, KEY_PW=key_password)
+        subprocess.run(
+            [
+                "keytool", "-genkeypair", "-keystore", str(ks),
+                "-storetype", "JKS", "-alias", "upload",
+                "-storepass:env", "STORE_PW", "-keypass:env", "KEY_PW",
+                "-keyalg", "RSA", "-keysize", "2048", "-validity", "365",
+                "-dname", "CN=Test,O=Test,C=US", "-noprompt",
+            ],
+            env=child_env,
+            check=True,
+            capture_output=True,
+        )
+        env = self._base_env()
+        env.update(
+            MICDROP_ANDROID_UPLOAD_KEYSTORE_BASE64=base64.b64encode(ks.read_bytes()).decode("ascii"),
+            MICDROP_ANDROID_UPLOAD_STORE_PASSWORD=store_password,
+            MICDROP_ANDROID_UPLOAD_KEY_ALIAS="upload",
+        )
+        # An omitted key password inherits the exact store password; a supplied
+        # password retains even whitespace-only contents instead of falling back.
+        for supplied_key_password in (None, key_password, "      "):
+            with self.subTest(key_password=supplied_key_password):
+                configured_env = dict(env)
+                if supplied_key_password is not None:
+                    configured_env["MICDROP_ANDROID_UPLOAD_KEY_PASSWORD"] = supplied_key_password
+                with mock.patch.dict(os.environ, configured_env, clear=True):
+                    android_signing.prepare_release()
+                    env_out = _parse_env_file(self.github_env)
+                    self.assertEqual(_parse_env_file(self.github_out)["release_signer"], "true")
+                    props = Path(env_out["MICDROP_RELEASE_SIGNING_PROPS"]).read_text(encoding="ascii")
+                    self.assertIn("storePassword=\\ StoreSecret\\#2026\\! \n", props)
+                    expected_key = {
+                        None: "\\ StoreSecret\\#2026\\! ",
+                        key_password: "\\t KeySecret\\#2026\\!\\t ",
+                        "      ": "\\      ",
+                    }[supplied_key_password]
+                    self.assertIn(f"keyPassword={expected_key}\n", props)
+                    os.environ.update(env_out)
+                    android_signing.cleanup()
+
     def test_verify_aab_rejects_debug_leaks_and_wrong_signer(self):
         ks1 = self.root / "k1.p12"
         ks2 = self.root / "k2.p12"

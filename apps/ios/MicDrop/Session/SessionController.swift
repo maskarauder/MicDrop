@@ -420,15 +420,19 @@ final class SessionController: StreamReceiving, @unchecked Sendable {
     /// Thread body: setup + status loop, failure mapping, then strict cleanup
     /// (`StreamReceiver.kt:349-875`). Never call from any other thread.
     func run() {
-        do {
-            try runSession()
-        } catch {
-            // A Stop-caused SessionStopped is ignored here because the session is already closed.
-            fail(
-                ConnectionFailure.describe(stage: stage, error: error, action: mode.reconnectAction),
-                code: SessionFailure.from(error), error: error)
+        // A dedicated Thread has no UIKit run-loop pool. Cover setup, failure handling and cleanup;
+        // statusLoop also drains its own pool after every iteration during a long-running stream.
+        autoreleasepool {
+            do {
+                try runSession()
+            } catch {
+                // A Stop-caused SessionStopped is ignored here because the session is already closed.
+                fail(
+                    ConnectionFailure.describe(stage: stage, error: error, action: mode.reconnectAction),
+                    code: SessionFailure.from(error), error: error)
+            }
+            cleanup()
         }
-        cleanup()
     }
 
     /// `step(stage)` (`StreamReceiver.kt:877-883`): checkpoint, set stage, journal checkpoint

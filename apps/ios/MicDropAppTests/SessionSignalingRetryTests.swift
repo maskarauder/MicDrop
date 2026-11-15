@@ -12,8 +12,22 @@ final class SessionSignalingRetryTests: XCTestCase {
 
     private final class Clock: MonotonicClock, @unchecked Sendable {
         let time = Locked<Int64>(1_000)
-        func nowMs() -> Int64 { time.value }
+        /// Installed before a test worker starts and subsequently used only by that worker.
+        var onRead: (() -> Void)?
+        func nowMs() -> Int64 {
+            onRead?()
+            return time.value
+        }
         func advance(_ milliseconds: Int64) { time.withLock { $0 += milliseconds } }
+    }
+
+    private final class AutoreleaseProbe: NSObject {
+        private let released: () -> Void
+        init(released: @escaping () -> Void) {
+            self.released = released
+            super.init()
+        }
+        deinit { released() }
     }
 
     private final class Transport: ControlTransport, @unchecked Sendable {
@@ -109,6 +123,84 @@ final class SessionSignalingRetryTests: XCTestCase {
     private func established(_ controller: SessionController) {
         controller.lanRecovery = LanRecovery(supported: true)
         controller.lanRecovery.observe(healthy: true, now: controller.nowMs())
+    }
+
+    func testStatusLoopDrainsTemporariesBetweenHandoffWaitsAndWhenStopped() throws {
+        let clock = Clock()
+        let fake = Transport { _ in
+            XCTFail("a pending handoff must not issue a request")
+            throw Failure.unexpectedNative
+        }
+        let controller = try session(local: fake, remote: fake, clock: clock)
+        established(controller)
+        controller.networkHandoff.arm()
+        XCTAssertTrue(controller.networkHandoff.changed(now: clock.time.value))
+        let allocated = Locked(0)
+        let released = Locked(0)
+        let releasedBeforeStop = Locked(0)
+        let releasedOnReturn = Locked(0)
+        clock.onRead = { [weak controller, weak clock] in
+            let count = allocated.withLock { value -> Int in
+                value += 1
+                return value
+            }
+            // Balance this explicit retain with an autorelease, independently of Foundation's implementation
+            // details or ARC's return-value optimizations. The nearest pool must dispose of the sentinel.
+            _ = Unmanaged.passRetained(AutoreleaseProbe { released.withLock { $0 += 1 } }).autorelease()
+            controller?.controlSignal.notify()  // Exercise the real wait without a wall-clock delay.
+            if count == 40 {
+                releasedBeforeStop.value = released.value
+                clock?.onRead = nil
+                controller?.close(.user)
+            }
+        }
+        let caught = Locked<Error?>(nil)
+        let done = expectation(description: "status loop stopped")
+        Thread {
+            // A worker-wide pool alone must not satisfy the between-iteration assertion.
+            autoreleasepool {
+                do {
+                    try controller.statusLoop()
+                } catch {
+                    caught.value = error
+                }
+                releasedOnReturn.value = released.value
+            }
+            done.fulfill()
+        }.start()
+        wait(for: [done], timeout: 5)
+        XCTAssertTrue(caught.value is SessionStopped)
+        XCTAssertEqual(allocated.value, 40)
+        XCTAssertGreaterThan(releasedBeforeStop.value, 0, "temporary objects must drain while the stream is running")
+        XCTAssertEqual(releasedOnReturn.value, allocated.value, "Stop must also drain the throwing iteration")
+    }
+
+    func testWorkerEntryDrainsCleanupTemporariesBeforeReturning() throws {
+        let clock = Clock()
+        let fake = Transport { _ in
+            XCTFail("a stopped worker must not issue a request")
+            throw Failure.unexpectedNative
+        }
+        let controller = try session(local: fake, remote: fake, clock: clock)
+        controller.close(.user)  // Skip setup and native media; run still performs the normal cleanup.
+        let allocated = Locked(0)
+        let released = Locked(0)
+        let releasedOnReturn = Locked(0)
+        clock.onRead = {
+            allocated.withLock { $0 += 1 }
+            _ = Unmanaged.passRetained(AutoreleaseProbe { released.withLock { $0 += 1 } }).autorelease()
+        }
+        let done = expectation(description: "worker cleaned up")
+        Thread {
+            autoreleasepool {
+                controller.run()
+                releasedOnReturn.value = released.value
+            }
+            done.fulfill()
+        }.start()
+        wait(for: [done], timeout: 5)
+        XCTAssertGreaterThan(allocated.value, 0, "the cleanup path must exercise the clock probe")
+        XCTAssertEqual(releasedOnReturn.value, allocated.value, "the entry pool must drain before run returns")
     }
 
     func testRetryAfterExhaustedRoutesReopensTheICECredentialCooldown() throws {
