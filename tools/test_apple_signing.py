@@ -438,6 +438,162 @@ class AppleSigningTests(unittest.TestCase):
                 self.assertEqual(len(log_calls), 1 if case == "invalid" else 0)
                 self.assertEqual(list(self.runner_temp.iterdir()), [])
 
+    def test_notary_wait_retries_transient_network_errors_without_resubmitting_and_staples_explicit_path(self):
+        stage_dir = self.base / "macos-notarize"
+        (stage_dir / "cli").mkdir(parents=True)
+        (stage_dir / "cli" / "micdrop-host").write_bytes(b"cli-host")
+        app_dir = self.base / "MicDrop.app"
+        app_dir.mkdir()
+        archive = b"combined signed bundle zip"
+        key_path = self.base / "AuthKey.p8"
+        key_text = "-----BEGIN PRIVATE KEY-----\nprivate-retry-test-key\n-----END PRIVATE KEY-----"
+        key_path.write_text(key_text, encoding="utf-8")
+        key_b64 = base64.b64encode(key_text.encode()).decode("ascii")
+        evidence_root = self.base / "evidence"
+        evidence_dir = evidence_root / stage_dir.name
+        state = {
+            "notarized": True,
+            "work_dir": str(self.runner_temp),
+            "api_key_path": str(key_path),
+            "api_key_id": API_KEY_ID,
+            "api_issuer_id": API_ISSUER_ID,
+        }
+        calls = []
+        sleeps = []
+        wait_attempts = {"count": 0}
+        stdout = io.StringIO()
+
+        def fake_run(args, **kwargs):
+            cmd = [str(a) for a in args]
+            calls.append(cmd)
+            if cmd[:4] == ["ditto", "-c", "-k", "--keepParent"]:
+                Path(cmd[5]).write_bytes(archive)
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if cmd[:3] == ["xcrun", "notarytool", "submit"]:
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"id": NOTARY_SUBMISSION_ID}), stderr="")
+            if cmd[:3] == ["xcrun", "notarytool", "wait"]:
+                self.assertEqual(cmd[3], NOTARY_SUBMISSION_ID)
+                wait_attempts["count"] += 1
+                if wait_attempts["count"] == 1:
+                    return subprocess.CompletedProcess(
+                        args,
+                        1,
+                        stdout="",
+                        stderr=(
+                            'Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain '
+                            'Code=-1009 "The Internet connection appears to be offline." '
+                            f'UserInfo={{_NSURLErrorNWPathKey=unsatisfied (No network route)}}) {key_text} {key_b64}'
+                        ),
+                    )
+                if wait_attempts["count"] == 2:
+                    return subprocess.CompletedProcess(
+                        args,
+                        1,
+                        stdout="",
+                        stderr=f"Error: HTTPError(statusCode: Optional(503), error: nil) {key_text}",
+                    )
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps({"id": NOTARY_SUBMISSION_ID, "status": "Accepted"}),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with patch.dict(
+            os.environ,
+            {"MICDROP_NOTARIZATION_EVIDENCE_DIR": str(evidence_root), "APPLE_API_PRIVATE_KEY_BASE64": key_b64},
+            clear=True,
+        ), patch.object(signing, "_load_state", return_value=state), patch(
+            "subprocess.run", side_effect=fake_run
+        ), patch("time.sleep", side_effect=sleeps.append), patch("sys.stdout", stdout):
+            signing.main(["notarize-macos", str(stage_dir), "--staple-path", str(app_dir)])
+
+        self.assertEqual(sum(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in calls), 1)
+        self.assertEqual(sum(cmd[:3] == ["xcrun", "notarytool", "wait"] for cmd in calls), 3)
+        self.assertEqual(sleeps, [5, 10])
+        staple_calls = [cmd for cmd in calls if cmd[:2] == ["xcrun", "stapler"]]
+        self.assertEqual(
+            staple_calls,
+            [
+                ["xcrun", "stapler", "staple", str(app_dir)],
+                ["xcrun", "stapler", "validate", str(app_dir)],
+            ],
+        )
+        receipt_text = (evidence_dir / "submission.json").read_text(encoding="utf-8")
+        receipt = json.loads(receipt_text)
+        self.assertEqual(receipt["status"], "Accepted")
+        self.assertEqual(receipt["id"], NOTARY_SUBMISSION_ID)
+        for secret in (key_text, key_b64):
+            self.assertNotIn(secret, stdout.getvalue() + receipt_text)
+
+    def test_notary_wait_exhausts_transient_retries_and_records_unconfirmed(self):
+        target = self.base / "MicDrop-retry-exhaust.zip"
+        target.write_bytes(b"zip-bytes")
+        key_path = self.base / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----", encoding="utf-8")
+        evidence_root = self.base / "evidence-exhaust"
+        state = {
+            "notarized": True,
+            "work_dir": str(self.runner_temp),
+            "api_key_path": str(key_path),
+            "api_key_id": API_KEY_ID,
+            "api_issuer_id": API_ISSUER_ID,
+        }
+        calls = []
+        sleeps = []
+
+        def fake_run(args, **kwargs):
+            cmd = [str(a) for a in args]
+            calls.append(cmd)
+            if cmd[:3] == ["xcrun", "notarytool", "submit"]:
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"id": NOTARY_SUBMISSION_ID}), stderr="")
+            if cmd[:3] == ["xcrun", "notarytool", "wait"]:
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    stdout="",
+                    stderr='Error Domain=NSURLErrorDomain Code=-1009 "The Internet connection appears to be offline."',
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with patch.dict(
+            os.environ,
+            {"MICDROP_NOTARIZATION_EVIDENCE_DIR": str(evidence_root)},
+            clear=True,
+        ), patch.object(signing, "_load_state", return_value=state), patch(
+            "subprocess.run", side_effect=fake_run
+        ), patch("time.sleep", side_effect=sleeps.append), patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, f"result unconfirmed.*{NOTARY_SUBMISSION_ID}"):
+                signing.notarize_macos(target, staple=False)
+
+        self.assertEqual(sum(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in calls), 1)
+        self.assertEqual(
+            sum(cmd[:3] == ["xcrun", "notarytool", "wait"] for cmd in calls),
+            1 + len(signing.NOTARY_WAIT_RETRY_DELAYS_SECONDS),
+        )
+        self.assertEqual(sleeps, list(signing.NOTARY_WAIT_RETRY_DELAYS_SECONDS))
+        receipt = json.loads((evidence_root / target.name / "submission.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "Result unconfirmed")
+
+    def test_notarize_macos_rejects_missing_staple_path_even_when_unconfigured(self):
+        target = self.base / "macos-notarize"
+        target.mkdir()
+        missing_app = self.base / "Missing.app"
+        with patch.object(signing, "_load_state", return_value={"notarized": False}):
+            with self.assertRaisesRegex(FileNotFoundError, "Cannot staple missing path"):
+                signing.notarize_macos(target, staple_paths=[missing_app])
+        self.assertFalse(
+            signing._is_transient_notary_wait_error(
+                "xcrun notarytool failed (exit 1): Error: HTTPError(statusCode: Optional(401), error: nil)"
+            )
+        )
+        self.assertFalse(
+            signing._is_transient_notary_wait_error(
+                "xcrun notarytool timed out after 3700s: NSURLErrorDomain"
+            )
+        )
+
     def test_ios_prepare_export_options_testflight_upload_and_cleanup(self):
         calls = []
         envs_seen = []

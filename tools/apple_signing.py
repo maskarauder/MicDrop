@@ -10,6 +10,7 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 MAX_SECRET_B64_LEN = 256 * 1024
 TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
@@ -28,6 +30,35 @@ ISSUER_UUID_RE = re.compile(
 )
 PROFILE_UUID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 IDENTITY_LINE_RE = re.compile(r'\b([0-9A-F]{40})\s+"([^"]+)"')
+NOTARY_WAIT_SECONDS = 3600
+NOTARY_WAIT_GRACE_SECONDS = 100
+NOTARY_WAIT_RETRY_DELAYS_SECONDS = (5, 10, 15, 20, 30, 30, 30)
+TRANSIENT_NOTARY_WAIT_ERROR_RE = re.compile(
+    r"(?:"
+    r"NSURLErrorDomain"
+    r"|NSPOSIXErrorDomain"
+    r"|kCFErrorDomainCFNetwork"
+    r"|NWError"
+    r"|The Internet connection appears to be offline"
+    r"|The network connection was lost"
+    r"|The request timed out"
+    r"|Could not connect to the server"
+    r"|server with the specified hostname could not be found"
+    r"|No network route"
+    r"|Connection reset by peer"
+    r"|Software caused connection abort"
+    r"|Temporary failure in name resolution"
+    r"|HTTPError\(statusCode:\s*(?:nil\b|Optional\((?:429|5\d\d)\)|(?:429|5\d\d)\b)"
+    r"|\bHTTP(?:/[0-9.]+)?\s+(?:429|500|502|503|504)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_notary_wait_error(message):
+    if not message or not message.startswith("xcrun notarytool failed "):
+        return False
+    return TRANSIENT_NOTARY_WAIT_ERROR_RE.search(message) is not None
 
 
 def _redact(text, sensitive):
@@ -390,11 +421,20 @@ def sign_macos(paths):
             print(f"Ad-hoc signed {target}")
 
 
-def notarize_macos(target, *, staple=False):
+def notarize_macos(target, *, staple=False, staple_paths=()):
     state = _load_state()
     target = Path(target)
     if not target.exists():
         raise FileNotFoundError(f"Cannot notarize missing path: {target}")
+    resolved_staple_targets = []
+    if staple:
+        resolved_staple_targets.append(target)
+    for raw_staple in staple_paths or ():
+        staple_target = Path(raw_staple)
+        if not staple_target.exists():
+            raise FileNotFoundError(f"Cannot staple missing path: {staple_target}")
+        if staple_target not in resolved_staple_targets:
+            resolved_staple_targets.append(staple_target)
     if not state.get("notarized"):
         print(f"Notarization not configured; skipping notarization for {target}")
         return
@@ -466,25 +506,54 @@ def notarize_macos(target, *, staple=False):
             raise RuntimeError("xcrun notarytool submit returned no valid submission UUID")
         receipt["id"] = sub_id
         record_status("Uploaded")
-        # A wait timeout does not cancel Apple's processing. Keep the upload's ID
-        # visible immediately, and wait on that same submission without reuploading.
+        # A wait timeout or transient network drop does not cancel Apple's processing.
+        # Keep the upload's ID visible immediately, and wait on that same submission
+        # without ever reuploading.
         print(f"Apple notarization submission {sub_id} for {target.name}: uploaded; waiting up to 60m", flush=True)
-        try:
-            proc = run_tool(
-                [
-                    "xcrun", "notarytool", "wait", sub_id, *credentials,
-                    "--timeout", "60m", "--output-format", "json",
-                ],
-                redact=sensitive,
-                timeout=3700,
-                accepted_returncodes=(0, 124),
+        deadline = time.monotonic() + NOTARY_WAIT_SECONDS
+        proc = None
+        for attempt_idx in range(len(NOTARY_WAIT_RETRY_DELAYS_SECONDS) + 1):
+            remaining = (
+                float(NOTARY_WAIT_SECONDS)
+                if attempt_idx == 0
+                else max(1.0, deadline - time.monotonic())
             )
-        except RuntimeError as exc:
-            record_status("Result unconfirmed")
-            raise RuntimeError(
-                f"Apple notarization result unconfirmed for {target.name} (id={sub_id}); "
-                f"check this submission before retrying: {exc}"
-            ) from None
+            wait_minutes = max(1, min(60, math.ceil(remaining / 60)))
+            proc_timeout = wait_minutes * 60 + NOTARY_WAIT_GRACE_SECONDS
+            try:
+                proc = run_tool(
+                    [
+                        "xcrun", "notarytool", "wait", sub_id, *credentials,
+                        "--timeout", f"{wait_minutes}m", "--output-format", "json",
+                    ],
+                    redact=sensitive,
+                    timeout=proc_timeout,
+                    accepted_returncodes=(0, 124),
+                )
+                break
+            except RuntimeError as exc:
+                safe_err = _redact(str(exc), sensitive)
+                if (
+                    _is_transient_notary_wait_error(safe_err)
+                    and attempt_idx < len(NOTARY_WAIT_RETRY_DELAYS_SECONDS)
+                ):
+                    delay = NOTARY_WAIT_RETRY_DELAYS_SECONDS[attempt_idx]
+                    if time.monotonic() + delay < deadline:
+                        retry_num = attempt_idx + 1
+                        max_retries = len(NOTARY_WAIT_RETRY_DELAYS_SECONDS)
+                        print(
+                            f"Apple notarization wait for {target.name} (id={sub_id}) hit a transient "
+                            f"network error (retry {retry_num}/{max_retries} in {delay}s; reusing existing "
+                            f"submission): {safe_err}",
+                            flush=True,
+                        )
+                        time.sleep(delay)
+                        continue
+                record_status("Result unconfirmed")
+                raise RuntimeError(
+                    f"Apple notarization result unconfirmed for {target.name} (id={sub_id}); "
+                    f"check this submission before retrying: {safe_err}"
+                ) from None
         if proc.returncode == 124:
             record_status("In Progress")
             raise RuntimeError(
@@ -534,10 +603,10 @@ def notarize_macos(target, *, staple=False):
     finally:
         shutil.rmtree(temp_zip_dir, ignore_errors=True)
 
-    if staple:
-        run_tool(["xcrun", "stapler", "staple", target])
-        run_tool(["xcrun", "stapler", "validate", target])
-        print(f"Stapled and validated notarization ticket on {target}")
+    for staple_target in resolved_staple_targets:
+        run_tool(["xcrun", "stapler", "staple", staple_target])
+        run_tool(["xcrun", "stapler", "validate", staple_target])
+        print(f"Stapled and validated notarization ticket on {staple_target}")
 
 
 def _verify_developer_id_metadata(target, expected_team_id):
@@ -855,6 +924,14 @@ def main(argv=None):
     notarize_cmd = sub.add_parser("notarize-macos", help="Submit zip/app/dir to Apple notarytool")
     notarize_cmd.add_argument("target", type=Path)
     notarize_cmd.add_argument("--staple", action="store_true")
+    notarize_cmd.add_argument(
+        "--staple-path",
+        dest="staple_paths",
+        action="append",
+        default=[],
+        type=Path,
+        help="Bundle path to staple and validate after notarization",
+    )
 
     verify_app_cmd = sub.add_parser("verify-macos-app", help="Verify MicDrop.app signature and Gatekeeper")
     verify_app_cmd.add_argument("app", type=Path)
@@ -877,7 +954,7 @@ def main(argv=None):
         elif args.command == "sign-macos":
             sign_macos(args.paths)
         elif args.command == "notarize-macos":
-            notarize_macos(args.target, staple=args.staple)
+            notarize_macos(args.target, staple=args.staple, staple_paths=args.staple_paths)
         elif args.command == "verify-macos-app":
             verify_macos_app(args.app)
         elif args.command == "verify-macos-binaries":
