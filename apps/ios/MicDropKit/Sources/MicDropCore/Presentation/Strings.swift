@@ -172,6 +172,8 @@ public enum Strings {
     public static let connectionLinkExpired = "This connection link has expired."  // (79)
     public static let connectionFailed = "The connection failed. Check the connection status."  // (80)
     public static let notices = "Open-source notices"  // (81)
+    public static let privacyPolicy = "Privacy policy"
+    public static let privacyPolicyURLString = "https://maskarauder.com/micdrop/privacy/"
     public static let localOutputTest = "Start local output test"  // (83)
     public static let playClick = "Play click"  // (84)
     public static let fastRecovery = "Faster recovery after audio interruptions"  // (85)

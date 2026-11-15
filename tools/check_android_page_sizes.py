@@ -2,7 +2,7 @@
 import argparse
 import struct
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 PAGE_SIZE = 16 * 1024
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -39,13 +39,24 @@ def check_elf(data):
         raise ValueError("ELF has no LOAD segments")
 
 
+def is_packaged_native_library(filename):
+    if not filename.endswith(".so"):
+        return False
+    parts = PurePosixPath(filename).parts
+    if len(parts) == 3 and parts[0] == "lib":
+        return True
+    if len(parts) == 4 and parts[0] != "BUNDLE-METADATA" and parts[1] == "lib":
+        return True
+    return False
+
+
 def check_apk(path):
     failures = []
     with zipfile.ZipFile(path) as apk:
         libraries = [entry for entry in apk.infolist()
-                     if entry.filename.startswith("lib/") and entry.filename.endswith(".so")]
+                     if is_packaged_native_library(entry.filename)]
         if not libraries:
-            raise ValueError("APK contains no native libraries")
+            raise ValueError("APK/AAB contains no native libraries")
         for entry in libraries:
             try:
                 check_elf(apk.read(entry))

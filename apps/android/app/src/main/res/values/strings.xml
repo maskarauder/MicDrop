@@ -100,6 +100,8 @@
   <string name="connection_link_expired">This connection link has expired.</string>
   <string name="connection_failed">The connection failed. Check the connection status.</string>
   <string name="notices">Open-source notices</string>
+  <string name="privacy_policy">Privacy policy</string>
+  <string name="privacy_policy_url" translatable="false">https://maskarauder.com/micdrop/privacy/</string>
   <string name="local_output_test">Start local output test</string>
   <string name="local_output_status">Tap Play click in Diagnostics. Stop ends the test.</string>
   <string name="play_click">Play click</string>

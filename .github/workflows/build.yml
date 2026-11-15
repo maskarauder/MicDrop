@@ -12,6 +12,23 @@ on:
         description: Upload build outputs and diagnostic artifacts to GitHub Actions
         type: boolean
         default: true
+      play_track:
+        description: Optional Google Play track to upload the signed release AAB to (after initial Play Console setup)
+        type: choice
+        default: none
+        options:
+          - none
+          - internal
+          - alpha
+          - beta
+          - production
+      play_release_status:
+        description: Google Play release status when play_track is enabled
+        type: choice
+        default: completed
+        options:
+          - completed
+          - draft
 
 permissions:
   contents: read
@@ -155,6 +172,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_play_store_graphics.py' -v
           python -m unittest discover -s tools -p 'test_apple_signing.py' -v
           python -m unittest discover -s tools -p 'test_windows_signing.py' -v
+          python -m unittest discover -s tools -p 'test_android_signing.py' -v
           python tools/generate_apple_icons.py check
           python tools/play_store_graphics.py check
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
@@ -835,18 +853,26 @@ jobs:
         env:
           MICDROP_DEBUG_KEYSTORE_BASE64: ${{ secrets.MICDROP_DEBUG_KEYSTORE_BASE64 }}
         run: python tools/android_signing.py prepare
+      - name: Prepare Android Play release signing
+        id: android_release_signing
+        env:
+          MICDROP_ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && secrets.MICDROP_ANDROID_UPLOAD_KEYSTORE_BASE64 || '' }}
+          MICDROP_ANDROID_UPLOAD_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.MICDROP_ANDROID_UPLOAD_STORE_PASSWORD || '' }}
+          MICDROP_ANDROID_UPLOAD_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.MICDROP_ANDROID_UPLOAD_KEY_ALIAS || '' }}
+          MICDROP_ANDROID_UPLOAD_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.MICDROP_ANDROID_UPLOAD_KEY_PASSWORD || '' }}
+        run: python tools/android_signing.py prepare-release
       - name: Test, compile, and lint
         working-directory: apps/android
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:testReleaseUnitTest :app:assembleDebug :app:bundleRelease :app:lintDebug :app:lintVitalRelease
       - name: Verify Android native 16 KB alignment
         run: |
           python tools/check_android_page_sizes.py apps/android/app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 apps/android/app/build/outputs/apk/debug/app-debug.apk
-      - name: Verify Android APK signing certificate
-        run: >-
-          python tools/android_signing.py verify
-          apps/android/app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          python tools/check_android_page_sizes.py apps/android/app/build/outputs/bundle/release/app-release.aab
+      - name: Verify Android APK and Play AAB signing certificates
+        run: |
+          python tools/android_signing.py verify apps/android/app/build/outputs/apk/debug/app-debug.apk "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          python tools/android_signing.py verify-aab apps/android/app/build/outputs/bundle/release/app-release.aab
       - name: Retain Android APK directly
         id: android_apk
         if: steps.android_signing.outputs.stable_signer == 'true'
@@ -865,17 +891,47 @@ jobs:
         env:
           APK_DOWNLOAD_URL: ${{ steps.android_apk.outputs.artifact-url }}
         run: echo "[Download app-debug.apk]($APK_DOWNLOAD_URL)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain Android Play Store App Bundle
+        id: android_play_aab
+        if: steps.android_release_signing.outputs.release_signer == 'true'
+        uses: ./.github/actions/store-artifact
+        with:
+          upload-to-github: ${{ github.event_name == 'push' || inputs.upload_artifacts == true }}
+          retain-release-bundle: false
+          name: android-play-aab
+          path: apps/android/app/build/outputs/bundle/release/app-release.aab
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Show Android Play AAB download link
+        if: steps.android_play_aab.outputs.artifact-url != ''
+        env:
+          AAB_DOWNLOAD_URL: ${{ steps.android_play_aab.outputs.artifact-url }}
+        run: echo "[Download app-release.aab (Google Play)]($AAB_DOWNLOAD_URL)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload signed Android App Bundle to Google Play
+        if: github.event_name == 'workflow_dispatch' && inputs.play_track != '' && inputs.play_track != 'none' && steps.android_release_signing.outputs.release_signer == 'true'
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+          PLAY_TRACK: ${{ inputs.play_track }}
+          PLAY_RELEASE_STATUS: ${{ inputs.play_release_status || 'completed' }}
+        run: >-
+          python tools/android_signing.py upload-play
+          --aab apps/android/app/build/outputs/bundle/release/app-release.aab
+          --package-name com.maskarauder.micdrop
+          --track "$PLAY_TRACK"
+          --status "$PLAY_RELEASE_STATUS"
+      - name: Fail if Google Play upload was requested without upload keystore secrets
+        if: github.event_name == 'workflow_dispatch' && inputs.play_track != '' && inputs.play_track != 'none' && steps.android_release_signing.outputs.release_signer != 'true'
+        run: |
+          echo "::error::Google Play upload requested (play_track=${{ inputs.play_track }}), but MICDROP_ANDROID_UPLOAD_* secrets are not configured."
+          exit 1
       - name: Verify Android draft-release packaging without uploading
         if: steps.android_signing.outputs.stable_signer == 'true'
         run: python tools/draft_release.py stage --platform android --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA"
       - name: Remove runner signing material
         if: always()
-        shell: bash
-        run: |
-          if [ -n "${MICDROP_DEBUG_KEYSTORE:-}" ]; then
-            rm -f -- "$MICDROP_DEBUG_KEYSTORE"
-            rmdir -- "$(dirname -- "$MICDROP_DEBUG_KEYSTORE")"
-          fi
+        run: python tools/android_signing.py cleanup
 
   ios-package:
     name: iPhone portable Swift contracts
