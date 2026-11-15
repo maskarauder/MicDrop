@@ -32,66 +32,79 @@ extension SessionController {
         case stop
     }
 
-    /// The `while (!closed)` loop (`StreamReceiver.kt:554-772`).
+    /// Whether another status iteration should run after this iteration's temporary objects are released.
+    private enum StatusIterationOutcome {
+        case next
+        case stop
+    }
+
+    /// The `while (!closed)` loop (`StreamReceiver.kt:554-772`). Each iteration drains Cocoa/WebRTC
+    /// temporaries, including recovery/probing early returns and thrown errors, before the next heartbeat.
     func statusLoop() throws {
         pendingReport = nil
         reportSequence = 0
         nextRouteReportAt = 0
-        loop: while !isClosed {
-            armNetworkHandoffIfEstablished()
-            if networkHandoff.waiting() {
-                lanRecovery.networkChanged(nowMs())
-                holdNetworkAudio()
-                suspendNetworkAudio()
-                emitPhase(.recovering)
-                emitStatus(Messages.networkChanged)
-                publishNetworkStatus()
-                if lanRecovery.expired(nowMs()) {
-                    fail(
-                        Messages.mediaRecoveryTimeout(seconds: recoveryWindowSeconds, action: mode.reconnectAction),
-                        code: .mediaRecoveryTimeout)
-                    break loop
-                }
-                guard networkHandoff.take(now: nowMs()) else {
-                    try waitForSignal(ms: Timing.handoffWaitMs)
-                    continue loop
-                }
-                try signalingRoute.recover { try self.probeLocal() }
-                networkHandoffs += 1
-            }
-            publishNetworkStatus()
-            if networkHeld { suspendNetworkAudio() }
-            if microphoneReturn && !networkHeld {
-                guard try microphoneLoopStep() else { break loop }
-            } else if microphoneReturn {
-                // Held: the Advanced keep-alive policy may stop a muted background capture, never start one.
-                applyBackgroundKeepAlive()
-            }
-            outputController.step()
-            if isClosed { break loop }
-            if !networkHeld && routeProbingActive() && nowMs() < nextRouteReportAt {
-                // Route probing in short worker steps without extra heartbeats (`:596-600`).
-                try waitForSignal(ms: Timing.probingWaitMs)
-                continue loop
-            }
-            let attemptedAt = nowMs()
-            let exchange: StatusExchange
-            do {
-                exchange = try exchangeStatus()
-            } catch {
-                guard try handleStatusFailure(error, attemptedAt: attemptedAt) else { break loop }
-                continue loop
-            }
-            if isClosed { break loop }
-            switch try processHostStatus(exchange, attemptedAt: attemptedAt) {
-            case .stop: break loop
-            case .restartNow: continue loop
-            case .proceed: break
-            }
-            try collectReport(exchange)
-            nextRouteReportAt = nowMs() + Timing.routeReportIntervalMs
-            try waitAfterReport()
+        while !isClosed {
+            let outcome = try autoreleasepool { try statusIteration() }
+            if outcome == .stop { break }
         }
+    }
+
+    /// One worker iteration. Session-owned state and queued callbacks retain anything needed after the pool drains.
+    private func statusIteration() throws -> StatusIterationOutcome {
+        armNetworkHandoffIfEstablished()
+        if networkHandoff.waiting() {
+            lanRecovery.networkChanged(nowMs())
+            holdNetworkAudio()
+            suspendNetworkAudio()
+            emitPhase(.recovering)
+            emitStatus(Messages.networkChanged)
+            publishNetworkStatus()
+            if lanRecovery.expired(nowMs()) {
+                fail(
+                    Messages.mediaRecoveryTimeout(seconds: recoveryWindowSeconds, action: mode.reconnectAction),
+                    code: .mediaRecoveryTimeout)
+                return .stop
+            }
+            guard networkHandoff.take(now: nowMs()) else {
+                try waitForSignal(ms: Timing.handoffWaitMs)
+                return .next
+            }
+            try signalingRoute.recover { try self.probeLocal() }
+            networkHandoffs += 1
+        }
+        publishNetworkStatus()
+        if networkHeld { suspendNetworkAudio() }
+        if microphoneReturn && !networkHeld {
+            guard try microphoneLoopStep() else { return .stop }
+        } else if microphoneReturn {
+            // Held: the Advanced keep-alive policy may stop a muted background capture, never start one.
+            applyBackgroundKeepAlive()
+        }
+        outputController.step()
+        if isClosed { return .stop }
+        if !networkHeld && routeProbingActive() && nowMs() < nextRouteReportAt {
+            // Route probing in short worker steps without extra heartbeats (`:596-600`).
+            try waitForSignal(ms: Timing.probingWaitMs)
+            return .next
+        }
+        let attemptedAt = nowMs()
+        let exchange: StatusExchange
+        do {
+            exchange = try exchangeStatus()
+        } catch {
+            return try handleStatusFailure(error, attemptedAt: attemptedAt) ? .next : .stop
+        }
+        if isClosed { return .stop }
+        switch try processHostStatus(exchange, attemptedAt: attemptedAt) {
+        case .stop: return .stop
+        case .restartNow: return .next
+        case .proceed: break
+        }
+        try collectReport(exchange)
+        nextRouteReportAt = nowMs() + Timing.routeReportIntervalMs
+        try waitAfterReport()
+        return .next
     }
 
     /// `if lanRecovery.established && remote && lanRecovery.supported { networkHandoff.arm() }`
