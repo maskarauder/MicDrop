@@ -4,6 +4,8 @@ Use your Android phone or iPhone—and its connected headphones or headset—as 
 wireless speaker, microphone, or two-way headset for your Windows 11 PC, with
 experimental Linux x64 and Apple Silicon macOS 14.2+ desktop and CLI host support.
 
+**[Official Website](https://maskarauder.com/micdrop/)** · **[Latest Releases](https://github.com/maskarauder/MicDrop/releases)** · **[Setup & Audio Guides](https://maskarauder.com/guides/)** · **[Online Stereo Test](https://maskarauder.com/tools/stereo-test/)** · **[Privacy Policy](https://maskarauder.com/micdrop/privacy/)**
+
 **Status: public beta.** Windows and Android LAN/remote streaming have passed
 functional acceptance on tested hardware; the iPhone app has passed Apple CI and
 initial LAN duplex/mute checks, with broader physical route, locked-screen, and
@@ -53,19 +55,54 @@ Download matching desktop and phone packages from the latest release on the
    - **Linux (x64):** Run `./micdrop-host desktop` (or
      `./micdrop-host desktop --install-launcher` to add an application menu
      entry; [Linux guide](docs/LINUX_DESKTOP.md)).
-2. **Install on your phone:** Install the matching Android `.apk`, install via
-   **TestFlight** on iPhone, or sideload the iPhone `.ipa` from the same release
-   version.
+2. **Install on your phone:** Install the matching Android `.apk`
+   ([Android streaming guide](https://maskarauder.com/guides/stream-pc-audio-to-android/)),
+   install via **TestFlight** on iPhone, or sideload the iPhone `.ipa` from the
+   same release version
+   ([iPhone streaming guide](https://maskarauder.com/guides/stream-pc-audio-to-iphone/)).
 3. **Pair your phone:** Open the **Phones** tab and click **Pair a phone** in
    the desktop app, scan the QR code (or paste the link) on your phone, verify
    the request ID, and click **Approve** on your computer.
 4. **Connect:** Tap **Connect** on your phone to start listening to desktop
    audio.
-   - **Using your phone as a desktop microphone?** Set up a separate
-     [virtual audio cable or sink](docs/VIRTUAL_AUDIO_CABLE.md), select it in
-     MicDrop on your computer, and enable microphone mode on your phone.
+   - **Using your phone as a desktop microphone?** Follow
+     [how to use your phone as a Windows microphone](https://maskarauder.com/guides/use-phone-as-windows-microphone/)
+     and set up a [virtual audio cable or sink](docs/VIRTUAL_AUDIO_CABLE.md)
+     (see [VB-CABLE setup](https://maskarauder.com/guides/vb-cable-setup-windows/),
+     [Discord setup](https://maskarauder.com/guides/phone-microphone-discord/), and
+     [OBS setup](https://maskarauder.com/guides/phone-microphone-obs/)).
    - **Connecting outside your home Wi-Fi?** See the optional
      [remote access guide](docs/REMOTE_ACCESS.md).
+
+## Setup Guides, Troubleshooting & Audio Tools
+
+Step-by-step walkthroughs, routing checklists, and browser sound checks on
+**[maskarauder.com](https://maskarauder.com/guides/)**:
+
+| Topic | Guide |
+| --- | --- |
+| **Listen on phone** | [Stream PC audio to an Android phone](https://maskarauder.com/guides/stream-pc-audio-to-android/) · [Stream Windows PC audio to an iPhone](https://maskarauder.com/guides/stream-pc-audio-to-iphone/) |
+| **Phone as PC mic** | [Use your phone as a Windows microphone](https://maskarauder.com/guides/use-phone-as-windows-microphone/) · [VB-CABLE Input vs. Output setup](https://maskarauder.com/guides/vb-cable-setup-windows/) |
+| **Voice & streaming apps** | [Phone microphone in Discord](https://maskarauder.com/guides/phone-microphone-discord/) · [Phone microphone in OBS](https://maskarauder.com/guides/phone-microphone-obs/) |
+| **Connection & playback fixes** | [Connected but no sound](https://maskarauder.com/guides/micdrop-no-sound/) · [Cannot find or connect on LAN](https://maskarauder.com/guides/micdrop-connection-troubleshooting/) · [Android audio stops with screen off](https://maskarauder.com/guides/android-audio-stops-screen-off/) |
+| **Latency & Bluetooth** | [Reduce PC-to-phone audio delay](https://maskarauder.com/guides/reduce-pc-to-phone-audio-latency/) · [Measure audio latency honestly](https://maskarauder.com/guides/measure-audio-latency/) · [Why Bluetooth sounds worse when the mic turns on](https://maskarauder.com/guides/bluetooth-headphones-bad-sound-microphone/) |
+| **Channel check** | [Online Left / Right Stereo Test](https://maskarauder.com/tools/stereo-test/) *(no install or mic access required)* |
+
+<details>
+<summary><strong>General Windows 11 &amp; Mac audio troubleshooting guides on maskarauder.com</strong></summary>
+
+- [No sound on Windows 11: step-by-step fix](https://maskarauder.com/guides/windows-11-no-sound/)
+- [Microphone not working on Windows 11](https://maskarauder.com/guides/windows-microphone-not-working/)
+- [Crackling or popping audio on Windows 11](https://maskarauder.com/guides/windows-audio-crackling-popping/)
+- [Windows volume too low even at 100%](https://maskarauder.com/guides/windows-volume-too-low/)
+- [Bluetooth headphones connected but no sound on Windows 11](https://maskarauder.com/guides/bluetooth-connected-no-sound/)
+- [Why can I hear myself in my headset? Fix microphone echo](https://maskarauder.com/guides/microphone-echo-hear-yourself/)
+- [USB headset or microphone not detected on Windows 11](https://maskarauder.com/guides/usb-headset-not-detected/)
+- [HDMI monitor or TV has no sound on Windows](https://maskarauder.com/guides/hdmi-monitor-no-sound/)
+- [No sound in Chrome, a game, or one app](https://maskarauder.com/guides/browser-or-app-no-sound/)
+- [No sound on a Mac](https://maskarauder.com/guides/mac-no-sound/)
+
+</details>
 
 ## Desktop UI Preview
 
@@ -120,40 +157,49 @@ macOS AppKit (`MicDrop.app`):
   refreshing every 7 days).
 - **Bluetooth audio behavior:** Bluetooth headphones add device buffering delay,
   and using a classic Bluetooth headset's microphone can switch headphone
-  playback to voice call quality depending on the headset and OS.
+  playback to voice call quality depending on the headset and OS
+  ([why Bluetooth audio changes when the mic turns on](https://maskarauder.com/guides/bluetooth-headphones-bad-sound-microphone/)).
 - **Virtual cable not bundled:** Microphone return requires a separately
-  configured virtual audio cable or sink (such as VB-CABLE on Windows, a
-  user-space HAL plugin like BlackHole 2ch on macOS, or a PipeWire/PulseAudio
+  configured virtual audio cable or sink (such as
+  [VB-CABLE on Windows](https://maskarauder.com/guides/vb-cable-setup-windows/),
+  a user-space HAL plugin like BlackHole 2ch on macOS, or a PipeWire/PulseAudio
   `module-null-sink` + `module-remap-source` pair on Linux); MicDrop does not
   install kernel audio drivers.
 - **One active stream at a time:** The desktop host runs while you are signed in
   and awake, and accepts one active phone audio session at a time.
 - **Latency stats vs. physical delay:** In-app RTT and buffer counters show
-  network/pipeline health, not acoustic speaker-to-ear latency
-  (see [latency measurement](docs/LATENCY.md) and the [roadmap](docs/ROADMAP.md)).
+  network/pipeline health, not acoustic speaker-to-ear latency (see
+  [reducing PC-to-phone audio delay](https://maskarauder.com/guides/reduce-pc-to-phone-audio-latency/),
+  [measuring audio latency honestly](https://maskarauder.com/guides/measure-audio-latency/),
+  [docs/LATENCY.md](docs/LATENCY.md), and the [roadmap](docs/ROADMAP.md)).
 
-For step-by-step testing tips, battery/background settings, and full user
-guides, see the [beta testing guide](docs/BETA_TESTING.md) and the
+For step-by-step testing tips, battery/background settings (including
+[Android screen-off audio](https://maskarauder.com/guides/android-audio-stops-screen-off/)),
+and full user guides, see the [MicDrop website](https://maskarauder.com/micdrop/),
+the [beta testing guide](docs/BETA_TESTING.md), and the
 [documentation index](docs/README.md).
 
 ## Support MicDrop
 
-MicDrop is free and open source. If you find it useful and want to support
-ongoing development, code-signing certificates, and store releases, you can
-chip in on Ko-fi:
+MicDrop is built by **[Maskarauder](https://maskarauder.com/)**. If you find it
+useful and want to support ongoing development, code-signing certificates, and
+store releases, you can chip in on Ko-fi:
 
 - **[Support MicDrop on Ko-fi (ko-fi.com/maskarauder)](https://ko-fi.com/maskarauder)**
+- **[Explore all audio guides & tools on maskarauder.com](https://maskarauder.com/guides/)**
 
 ## Report Issues & Contribute
 
-- **Bug reports:** Open an [Issue](https://github.com/maskarauder/MicDrop/issues)
+- **Bug reports:** Check [connected but no sound](https://maskarauder.com/guides/micdrop-no-sound/)
+  and the [LAN connection checklist](https://maskarauder.com/guides/micdrop-connection-troubleshooting/)
+  first, then open an [Issue](https://github.com/maskarauder/MicDrop/issues)
   with your app version, desktop and phone OS versions, audio route (speaker,
   wired, or Bluetooth model), and steps to reproduce. Review diagnostic reports
   before sharing and never post pairing links, relay credentials, or private
   audio.
-- **Security vulnerabilities:** Please report privately via
-  [SECURITY.md](SECURITY.md) rather than a public issue
-  (see also the [security and privacy guide](docs/SECURITY.md)).
+- **Security & privacy:** Read the [MicDrop privacy policy](https://maskarauder.com/micdrop/privacy/)
+  and [security guide](docs/SECURITY.md), and report vulnerabilities privately
+  via [SECURITY.md](SECURITY.md) rather than a public issue.
 - **Building from source & contributing:** Developers looking to build locally,
   run contract checks, or submit pull requests should start with
   [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
