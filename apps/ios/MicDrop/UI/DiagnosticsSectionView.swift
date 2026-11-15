@@ -4,9 +4,10 @@ import MicDropCore
 import SwiftUI
 
 /// Help, the build label, copy report / crash report, the local output test, Play click (only while the test runs), the
-/// selectable diagnostics text and the open-source notices button (last item).
+/// selectable diagnostics text, open-source notices and the privacy policy link.
 struct DiagnosticsSectionView: View {
     let model: MainViewModel
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         let render = model.render
@@ -35,8 +36,13 @@ struct DiagnosticsSectionView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            // 8. Open-source notices (sheet).
+            // 8-9. Open-source notices (sheet) and privacy policy (HTTPS).
             diagnosticsButton(Strings.notices, enabled: true) { model.noticesTapped() }
+            diagnosticsButton(Strings.privacyPolicy, enabled: true) {
+                if let url = URL(string: Strings.privacyPolicyURLString) {
+                    openURL(url)
+                }
+            }
         }
     }
 

@@ -516,6 +516,7 @@ open class MainActivity : ComponentActivity() {
             addView(localButton); addView(clickButton)
             addView(diagnosticsView)
             addView(button(R.string.notices) { showNotices() })
+            addView(button(R.string.privacy_policy) { openPrivacyPolicy() })
         }
         content.addView(sections)
         root.addView(ScrollView(this).apply {
@@ -544,6 +545,15 @@ open class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this).setTitle(R.string.notices)
             .setView(ScrollView(this).apply { addView(content) })
             .setPositiveButton(android.R.string.ok, null).show()
+    }
+    private fun openPrivacyPolicy() {
+        val url = getString(R.string.privacy_policy_url)
+        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
+        runCatching { startActivity(intent) }.onFailure {
+            AlertDialog.Builder(this).setTitle(R.string.privacy_policy)
+                .setMessage(url)
+                .setPositiveButton(android.R.string.ok, null).show()
+        }
     }
 
     override fun onStart() {

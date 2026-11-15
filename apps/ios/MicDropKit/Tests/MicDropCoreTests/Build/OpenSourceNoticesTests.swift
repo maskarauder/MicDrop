@@ -1,3 +1,4 @@
+import Foundation
 import MicDropCore
 import XCTest
 
@@ -29,5 +30,13 @@ final class OpenSourceNoticesTests: XCTestCase {
     func testTitleAndUnavailableText() {
         XCTAssertEqual(OpenSourceNotices.title, "Open-source notices")
         XCTAssertEqual(OpenSourceNotices.unavailableText, "Open-source notices are unavailable in this build.")
+    }
+
+    func testPrivacyPolicyLinkUsesPublishedHttpsEndpoint() throws {
+        XCTAssertEqual(Strings.privacyPolicy, "Privacy policy")
+        XCTAssertEqual(Strings.privacyPolicyURLString, "https://maskarauder.com/micdrop/privacy/")
+        let url = try XCTUnwrap(URL(string: Strings.privacyPolicyURLString))
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "maskarauder.com")
     }
 }

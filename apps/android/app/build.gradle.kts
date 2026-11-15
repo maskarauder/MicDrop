@@ -39,9 +39,28 @@ android {
       keyPassword = "android"
     }
   }
+  val releaseSigning = System.getenv("MICDROP_RELEASE_SIGNING_PROPS")?.let { path ->
+    val propsFile = file(path)
+    require(propsFile.isFile) { "MICDROP_RELEASE_SIGNING_PROPS must point to an existing properties file" }
+    val props = Properties().apply { propsFile.inputStream().use { load(it) } }
+    val keystore = file(requireNotNull(props.getProperty("storeFile")) { "Missing storeFile in release signing properties" })
+    require(keystore.isFile) { "Release keystore must point to an existing file" }
+    signingConfigs.create("release") {
+      storeFile = keystore
+      storePassword = requireNotNull(props.getProperty("storePassword")) { "Missing storePassword in release signing properties" }
+      keyAlias = requireNotNull(props.getProperty("keyAlias")) { "Missing keyAlias in release signing properties" }
+      keyPassword = requireNotNull(props.getProperty("keyPassword")) { "Missing keyPassword in release signing properties" }
+    }
+  }
   buildTypes {
     debug { applicationIdSuffix = ".dev" }
-    release { isMinifyEnabled = false }
+    release {
+      isMinifyEnabled = false
+      if (releaseSigning != null) {
+        signingConfig = releaseSigning
+      }
+      ndk { debugSymbolLevel = "SYMBOL_TABLE" }
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_17

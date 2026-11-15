@@ -47,6 +47,23 @@ class AndroidPageSizeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "libdependency.so: LOAD alignment"):
                 check_apk(apk)
 
+    def test_checks_app_bundle_module_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            valid_aab = Path(directory) / "valid.aab"
+            with zipfile.ZipFile(valid_aab, "w") as package:
+                package.writestr("base/lib/arm64-v8a/libjingle_peerconnection_so.so", library())
+                package.writestr(
+                    "BUNDLE-METADATA/com.android.tools.build.debugsymbols/arm64-v8a/libjingle_peerconnection_so.so.sym",
+                    b"not-a-runtime-elf",
+                )
+            check_apk(valid_aab)
+
+            bad_aab = Path(directory) / "bad.aab"
+            with zipfile.ZipFile(bad_aab, "w") as package:
+                package.writestr("base/lib/arm64-v8a/libjingle_peerconnection_so.so", library(alignment=0x1000))
+            with self.assertRaisesRegex(ValueError, "base/lib/arm64-v8a/libjingle_peerconnection_so.so: LOAD alignment"):
+                check_apk(bad_aab)
+
 
 if __name__ == "__main__":
     unittest.main()
