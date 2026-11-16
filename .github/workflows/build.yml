@@ -178,6 +178,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_ci_apt_install.py' -v
           python tools/generate_apple_icons.py check
           python tools/play_store_graphics.py check
+          python tools/play_store_screenshots.py check
           python tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
       - name: Validate Android page-size rejection checks
         if: runner.os == 'Linux'
