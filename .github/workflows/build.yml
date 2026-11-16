@@ -171,6 +171,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_package_unix_host.py' -v
           python -m unittest discover -s tools -p 'test_generate_apple_icons.py' -v
           python -m unittest discover -s tools -p 'test_play_store_graphics.py' -v
+          python -m unittest discover -s tools -p 'test_play_store_screenshots.py' -v
           python -m unittest discover -s tools -p 'test_apple_signing.py' -v
           python -m unittest discover -s tools -p 'test_windows_signing.py' -v
           python -m unittest discover -s tools -p 'test_android_signing.py' -v

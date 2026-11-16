@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Android Play Store screenshots
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-screenshots.yml'
+      - 'apps/android/**'
+      - 'tools/*play_store_screenshots*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    name: Capture 1080x1920 Play Store phone screenshots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          cache-disabled: true
+      - name: Validate screenshot normalization and Play Store checks
+        run: python3 -m unittest discover -s tools -p 'test_play_store_screenshots.py' -v
+      - name: Install pinned Android packages
+        run: |
+          mkdir -p "$RUNNER_TEMP/.android"
+          echo "ANDROID_USER_HOME=$RUNNER_TEMP/.android" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;35.0.0" \
+            "ndk;27.0.12077973" "platform-tools" "emulator"
+      - name: Fetch verified Android WebRTC
+        run: python3 tools/fetch_webrtc.py android
+      - name: Compile debug app and screenshot instrumentation APKs
+        working-directory: apps/android
+        run: ./gradlew --no-daemon -PmicdropEmulatorScreenshots=true :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Enable KVM permissions on Ubuntu runner
+        run: |
+          if [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+      - name: Check emulator acceleration and disk space
+        run: |
+          test -r /dev/kvm && test -w /dev/kvm || { echo '::error::The Linux runner requires hardware virtualization (/dev/kvm) for Android emulator screenshots.'; exit 1; }
+          "$ANDROID_HOME/emulator/emulator" -accel-check
+          df -h "$ANDROID_HOME" "$RUNNER_TEMP"
+      - name: Boot emulator and capture Play Store phone screenshots
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          working-directory: apps/android
+          script: |
+            set -euo pipefail
+            adb wait-for-device
+            adb shell wm size 1080x1920
+            adb shell wm density 420
+            adb shell settings put system accelerometer_rotation 0
+            adb shell settings put system user_rotation 0
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell wm dismiss-keyguard
+            adb shell rm -rf /data/local/tmp/micdrop-screenshots
+            adb shell mkdir -p /data/local/tmp/micdrop-screenshots
+
+            ./gradlew --no-daemon \
+              -PmicdropEmulatorScreenshots=true \
+              :app:connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class=com.maskarauder.micdrop.PlayStoreScreenshotsTest \
+              -Pandroid.testInstrumentationRunnerArguments.micdropScreenshots=true
+
+            rm -rf "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
+            mkdir -p "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
+            adb pull /data/local/tmp/micdrop-screenshots/. "$RUNNER_TEMP/raw-screenshots/"
+            python3 ../../tools/play_store_screenshots.py normalize "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
+      - name: Upload Play Store 24-bit RGB phone screenshots
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-play-screenshots
+          path: ${{ runner.temp }}/play-screenshots/*.png
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Retain instrumentation reports on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-screenshots-test-reports
+          path: |
+            apps/android/app/build/reports/androidTests/
+            apps/android/app/build/outputs/androidTest-results/
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
