@@ -9,6 +9,7 @@ on:
       - '.github/workflows/android-screenshots.yml'
       - 'apps/android/**'
       - 'tools/*play_store_screenshots*'
+      - 'tools/capture_emulator_screenshots.sh'
 
 permissions:
   contents: read
@@ -69,28 +70,7 @@ jobs:
           profile: pixel
           disable-animations: true
           working-directory: apps/android
-          script: |
-            set -euo pipefail
-            adb wait-for-device
-            adb shell wm size 1080x1920
-            adb shell wm density 420
-            adb shell settings put system accelerometer_rotation 0
-            adb shell settings put system user_rotation 0
-            adb shell input keyevent KEYCODE_WAKEUP
-            adb shell wm dismiss-keyguard
-            adb shell rm -rf /data/local/tmp/micdrop-screenshots
-            adb shell mkdir -p /data/local/tmp/micdrop-screenshots
-
-            ./gradlew --no-daemon \
-              -PmicdropEmulatorScreenshots=true \
-              :app:connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=com.maskarauder.micdrop.PlayStoreScreenshotsTest \
-              -Pandroid.testInstrumentationRunnerArguments.micdropScreenshots=true
-
-            rm -rf "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
-            mkdir -p "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
-            adb pull /data/local/tmp/micdrop-screenshots/. "$RUNNER_TEMP/raw-screenshots/"
-            python3 ../../tools/play_store_screenshots.py normalize "$RUNNER_TEMP/raw-screenshots" "$RUNNER_TEMP/play-screenshots"
+          script: bash ../../tools/capture_emulator_screenshots.sh
       - name: Upload Play Store 24-bit RGB phone screenshots
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
