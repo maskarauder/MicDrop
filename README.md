@@ -81,7 +81,7 @@ Step-by-step walkthroughs, routing checklists, and browser sound checks on
 
 | Topic | Guide |
 | --- | --- |
-| **Listen on phone** | [Stream PC audio to an Android phone](https://maskarauder.com/guides/stream-pc-audio-to-android/) · [Stream Windows PC audio to an iPhone](https://maskarauder.com/guides/stream-pc-audio-to-iphone/) |
+| **Listen on phone** | [Stream PC audio to an Android phone](https://maskarauder.com/guides/stream-pc-audio-to-android/) · [Stream Windows PC audio to an iPhone](https://maskarauder.com/guides/stream-pc-audio-to-iphone/) · [Stream Mac audio to phone](https://maskarauder.com/guides/stream-mac-audio-to-phone/) · [Stream Linux audio to phone](https://maskarauder.com/guides/stream-linux-audio-to-phone/) |
 | **Phone as PC mic** | [Use your phone as a Windows microphone](https://maskarauder.com/guides/use-phone-as-windows-microphone/) · [VB-CABLE Input vs. Output setup](https://maskarauder.com/guides/vb-cable-setup-windows/) |
 | **Voice & streaming apps** | [Phone microphone in Discord](https://maskarauder.com/guides/phone-microphone-discord/) · [Phone microphone in OBS](https://maskarauder.com/guides/phone-microphone-obs/) |
 | **Connection & playback fixes** | [Connected but no sound](https://maskarauder.com/guides/micdrop-no-sound/) · [Cannot find or connect on LAN](https://maskarauder.com/guides/micdrop-connection-troubleshooting/) · [Android audio stops with screen off](https://maskarauder.com/guides/android-audio-stops-screen-off/) |
