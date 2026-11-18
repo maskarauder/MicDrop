@@ -4,7 +4,7 @@ Use your Android phone or iPhone—and its connected headphones or headset—as 
 wireless speaker, microphone, or two-way headset for your Windows 11 PC, with
 experimental Linux x64 and Apple Silicon macOS 14.2+ desktop and CLI host support.
 
-**[Official Website](https://maskarauder.com/micdrop/)** · **[Latest Releases](https://github.com/maskarauder/MicDrop/releases)** · **[Setup & Audio Guides](https://maskarauder.com/guides/)** · **[Online Stereo Test](https://maskarauder.com/tools/stereo-test/)** · **[Privacy Policy](https://maskarauder.com/micdrop/privacy/)**
+**[Official Website](https://maskarauder.com/micdrop/)** · **[Latest Releases](https://github.com/maskarauder/MicDrop/releases)** · **[Setup & Audio Guides](https://maskarauder.com/guides/)** · **[Audio Tools](https://maskarauder.com/tools/)** · **[Privacy Policy](https://maskarauder.com/micdrop/privacy/)**
 
 **Status: public beta.** Windows and Android LAN/remote streaming have passed
 functional acceptance on tested hardware; the iPhone app has passed Apple CI and
@@ -81,12 +81,12 @@ Step-by-step walkthroughs, routing checklists, and browser sound checks on
 
 | Topic | Guide |
 | --- | --- |
-| **Listen on phone** | [Stream PC audio to an Android phone](https://maskarauder.com/guides/stream-pc-audio-to-android/) · [Stream Windows PC audio to an iPhone](https://maskarauder.com/guides/stream-pc-audio-to-iphone/) |
+| **Listen on phone** | [Stream PC audio to an Android phone](https://maskarauder.com/guides/stream-pc-audio-to-android/) · [Stream Windows PC audio to an iPhone](https://maskarauder.com/guides/stream-pc-audio-to-iphone/) · [Stream Mac audio to phone](https://maskarauder.com/guides/stream-mac-audio-to-phone/) · [Stream Linux audio to phone](https://maskarauder.com/guides/stream-linux-audio-to-phone/) |
 | **Phone as PC mic** | [Use your phone as a Windows microphone](https://maskarauder.com/guides/use-phone-as-windows-microphone/) · [VB-CABLE Input vs. Output setup](https://maskarauder.com/guides/vb-cable-setup-windows/) |
 | **Voice & streaming apps** | [Phone microphone in Discord](https://maskarauder.com/guides/phone-microphone-discord/) · [Phone microphone in OBS](https://maskarauder.com/guides/phone-microphone-obs/) |
 | **Connection & playback fixes** | [Connected but no sound](https://maskarauder.com/guides/micdrop-no-sound/) · [Cannot find or connect on LAN](https://maskarauder.com/guides/micdrop-connection-troubleshooting/) · [Android audio stops with screen off](https://maskarauder.com/guides/android-audio-stops-screen-off/) |
 | **Latency & Bluetooth** | [Reduce PC-to-phone audio delay](https://maskarauder.com/guides/reduce-pc-to-phone-audio-latency/) · [Measure audio latency honestly](https://maskarauder.com/guides/measure-audio-latency/) · [Why Bluetooth sounds worse when the mic turns on](https://maskarauder.com/guides/bluetooth-headphones-bad-sound-microphone/) |
-| **Channel check** | [Online Left / Right Stereo Test](https://maskarauder.com/tools/stereo-test/) *(no install or mic access required)* |
+| **Browser audio tools** | [Microphone Test](https://maskarauder.com/tools/microphone-test/) · [Left / Right Stereo Test](https://maskarauder.com/tools/stereo-test/) · [Tone & Noise Generator](https://maskarauder.com/tools/tone-generator/) · [Discord & OBS Routing Helper](https://maskarauder.com/tools/audio-routing/) · [WAV File Inspector](https://maskarauder.com/tools/wav-inspector/) · [Audio Sync Check](https://maskarauder.com/tools/audio-sync-test/) |
 
 <details>
 <summary><strong>General Windows 11 &amp; Mac audio troubleshooting guides on maskarauder.com</strong></summary>
