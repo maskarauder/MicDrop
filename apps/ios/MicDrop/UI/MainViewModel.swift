@@ -1231,9 +1231,9 @@ final class MainViewModel {
     }
 
     #if DEBUG
-    /// Seeds a deterministic LAN discovery view for simulator App Store screenshots.
-    func applyScreenshotDiscovery(_ view: DiscoveryView) {
-        renderDiscovery(view)
-    }
+        /// Seeds a deterministic LAN discovery view for simulator App Store screenshots.
+        func applyScreenshotDiscovery(_ view: DiscoveryView) {
+            renderDiscovery(view)
+        }
     #endif
 }

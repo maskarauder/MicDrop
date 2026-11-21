@@ -13,39 +13,39 @@ import SwiftUI
 @main
 struct MicDropApp: App {
     #if DEBUG
-    private enum LaunchMode {
-        case live(AppEnvironment)
-        case screenshot(ScreenshotEnvironment)
-    }
+        private enum LaunchMode {
+            case live(AppEnvironment)
+            case screenshot(ScreenshotEnvironment)
+        }
 
-    private let launchMode: LaunchMode
+        private let launchMode: LaunchMode
     #else
-    private let environment: AppEnvironment
+        private let environment: AppEnvironment
     #endif
 
     init() {
         #if DEBUG
-        if let launch = ScreenshotLaunch.current {
-            launchMode = .screenshot(ScreenshotEnvironment(launch: launch))
-        } else {
-            launchMode = .live(AppEnvironment())
-        }
+            if let launch = ScreenshotLaunch.current {
+                launchMode = .screenshot(ScreenshotEnvironment(launch: launch))
+            } else {
+                launchMode = .live(AppEnvironment())
+            }
         #else
-        environment = AppEnvironment()
+            environment = AppEnvironment()
         #endif
     }
 
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            switch launchMode {
-            case .live(let environment):
-                AppRootView(environment: environment)
-            case .screenshot(let screenshotEnvironment):
-                ScreenshotRootView(environment: screenshotEnvironment)
-            }
+                switch launchMode {
+                case .live(let environment):
+                    AppRootView(environment: environment)
+                case .screenshot(let screenshotEnvironment):
+                    ScreenshotRootView(environment: screenshotEnvironment)
+                }
             #else
-            AppRootView(environment: environment)
+                AppRootView(environment: environment)
             #endif
         }
     }

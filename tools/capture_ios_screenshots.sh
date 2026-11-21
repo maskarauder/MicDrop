@@ -67,7 +67,7 @@ while IFS=$'\t' read -r display_class udid sim_name runtime; do
     --cellularMode active \
     --cellularBars 4 \
     --operatorName "" \
-    --batteryState charged \
+    --batteryState discharging \
     --batteryLevel 100
   sleep 1
 
