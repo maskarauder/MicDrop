@@ -65,7 +65,7 @@ env:
 jobs:
   ios:
     name: iPhone app
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       MICDROP_BUNDLE_ID: com.maskarauder.micdrop
@@ -77,30 +77,51 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Select Xcode 26+ and verify runner tools
+      - name: Select Xcode 27+ and verify runner tools
         run: |
           set -euo pipefail
           test "$RUNNER_OS" = macOS
-          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
-            dev_dir=/Applications/Xcode_26.6.app/Contents/Developer
-          else
-            dev_dir=/Applications/Xcode.app/Contents/Developer
-          fi
+          dev_dir="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+          apps = sorted(Path("/Applications").glob("Xcode*.app"))
+          best = None
+          for app in apps:
+              dev = app / "Contents" / "Developer"
+              if not dev.is_dir():
+                  continue
+              m = re.fullmatch(r"Xcode_(\d+)\.(\d+)(?:\.(\d+))?\.app", app.name)
+              if m and int(m.group(1)) >= 27:
+                  ver = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+                  if best is None or ver > best[0]:
+                      best = (ver, dev)
+          if best is not None:
+              print(best[1])
+          else:
+              print("/Applications/Xcode.app/Contents/Developer")
+          PY
+          )"
           export DEVELOPER_DIR="$dev_dir"
           echo "DEVELOPER_DIR=$dev_dir" >> "$GITHUB_ENV"
           echo "Platform: $RUNNER_OS/$RUNNER_ARCH"
+          echo "DEVELOPER_DIR: $dev_dir"
           sw_vers
           xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
-          python3 - "$RUNNER_TEMP/xcode-version.txt" <<'PY'
+          ios_sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iOS SDK: $ios_sdk"
+          python3 - "$RUNNER_TEMP/xcode-version.txt" "$ios_sdk" <<'PY'
           from pathlib import Path
           import re, sys
           text = Path(sys.argv[1]).read_text(encoding="utf-8")
+          sdk = sys.argv[2].strip()
           match = re.search(r"^Xcode (\d+)\.", text, re.MULTILINE)
-          if not match or int(match.group(1)) < 26:
-              raise SystemExit(f"Expected Xcode 26 or newer, got:\n{text}")
+          if not match or int(match.group(1)) < 27:
+              raise SystemExit(f"Expected Xcode 27 or newer, got:\n{text}")
+          sdk_match = re.match(r"^(\d+)\.", sdk)
+          if not sdk_match or int(sdk_match.group(1)) < 27:
+              raise SystemExit(f"Expected iOS 27 SDK or newer (App Store Connect ITMS-90725), got: {sdk}")
           PY
           swift --version
-          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
           python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
       - name: Check committed Swift package pins and notices
         run: python3 tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
@@ -265,7 +286,7 @@ jobs:
                   name = dev.get("name", "")
                   if not name.startswith("iPhone"):
                       continue
-                  preferred = 1 if name == "iPhone 17" else (0 if "SE" not in name else -1)
+                  preferred = 1 if name in {"iPhone 18", "iPhone 17"} else (0 if "SE" not in name else -1)
                   candidates.append((ver, preferred, name, dev["udid"]))
           if not candidates:
               raise SystemExit("No available iPhone simulator runtime found")

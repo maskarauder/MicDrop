@@ -32,8 +32,8 @@ shared C++ tone diagnostics remain available across Windows, Linux, and macOS.
 | Android Build Tools | 35.0.0 |
 | Android NDK | 27.0.12077973, for packaging prebuilt native libraries |
 | iPhone | iOS 17.0+, arm64 iPhone (`com.maskarauder.micdrop`); TestFlight distribution IPA (`Apple Distribution`) and unsigned sideload IPA |
-| Xcode | 26.6 (17F113) on GitHub-hosted `macos-26`; iOS SDK 26.5 |
-| Swift | 6.3 toolchain (Xcode 26.6; Linux `swift:6.3.3-noble` by digest); Swift 5 language mode |
+| Xcode | 27+ on GitHub-hosted `xcode-27` (iOS 27+ SDK for iPhone builds); 26.6 (17F113) on `macos-26` for the macOS desktop host |
+| Swift | Xcode 27 toolchain on `xcode-27` (Linux `swift:6.3.3-noble` by digest for portable `MicDropKit` contracts); Swift 5 language mode |
 | XcodeGen | 2.46.0 release zip, SHA-256 `4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806` |
 | SwiftPM packages | Exact versions in `apps/ios/MicDropKit/Package.swift`; pins in its `Package.resolved`; see [iPhone provenance](../third_party/IOS.md) |
 | WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Linux, macOS, Android, and iPhone; checksummed assets in the lock file |
@@ -448,8 +448,8 @@ python -m unittest discover -s tools/latency -p 'test_*.py' -v
 ## iPhone app
 
 The iPhone client is native Swift/SwiftUI for iOS 17+ (iPhone only).
-GitHub Actions builds an **unsigned** `MicDrop.ipa` on GitHub-hosted `macos-26`
-runners with Xcode 26+; sign and install it from Windows with Sideloadly or
+GitHub Actions builds an **unsigned** `MicDrop.ipa` on GitHub-hosted `xcode-27`
+runners with Xcode 27+; sign and install it from Windows with Sideloadly or
 iloader and your Apple ID. See [iPhone provenance](../third_party/IOS.md) and
 the [WebRTC record](../third_party/WEBRTC.md).
 
@@ -516,7 +516,7 @@ manifest, generated pins and notices together and require both Linux and macOS c
 
 ### iPhone CI build
 
-The **iPhone app** workflow (`.github/workflows/ios.yml`) runs on GitHub-hosted `macos-26` runners for
+The **iPhone app** workflow (`.github/workflows/ios.yml`) runs on GitHub-hosted `xcode-27` runners for
 pushes to `main` and pull requests (including fork pull requests, because the build needs no secrets)
 that change `apps/ios/`, `third_party/`, the fetcher or the iPhone check scripts, and on demand for any
 branch (**Actions > iPhone app > Run workflow**; choose `main` for an IPA of the default branch). It
@@ -689,7 +689,7 @@ job logs rather than treated as a fully hermetic toolchain.
 
 The **iPhone portable Swift contracts** job builds and tests `MicDropKit` on `ubuntu-24.04`
 in the digest-pinned Swift image, and the **iPhone Swift formatting** job checks Swift
-formatting. The path-filtered **iPhone app** workflow runs on GitHub-hosted `macos-26`
+formatting. The path-filtered **iPhone app** workflow runs on GitHub-hosted `xcode-27`
 runners, publishes the unarchived `MicDrop.ipa` after the pin, bundle, Mach-O and
 unsigned checks, and on non-PR runs with Apple distribution secrets also builds and
 verifies `MicDrop-appstore.ipa` (with optional `upload_testflight: true` submission).
