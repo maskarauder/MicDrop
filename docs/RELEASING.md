@@ -13,7 +13,7 @@ Edit `internal/version/version.properties` and add matching notes at
 `docs/releases/<version>.md`. Windows, Linux, macOS, the Windows installer,
 Android and the draft package names read that same version; `MicDrop.app` uses
 `tools/macos_app_bundle.py` and the iPhone build uses `tools/ios_version.py`.
-Current metadata is `0.1.0-beta.4` with Android version code `5`.
+Current metadata is `0.1.0` with Android version code `6`.
 
 Use `MAJOR.MINOR.PATCH`, optionally followed by `-alpha.N`, `-beta.N` or `-rc.N`.
 Each numeric Windows component is at most 65535. Increase `android_version_code`
@@ -227,7 +227,7 @@ workflow runs or dispatch fresh `main` builds:
 ```powershell
 $ErrorActionPreference = 'Stop'
 $MicDropRepo = 'maskarauder/MicDrop'
-$MicDropVersion = '0.1.0-beta.4'
+$MicDropVersion = '0.1.0'
 $MicDropTag = "v$MicDropVersion"
 
 gh workflow run build.yml --repo $MicDropRepo --ref main
