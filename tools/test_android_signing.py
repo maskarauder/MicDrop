@@ -28,6 +28,20 @@ def _parse_env_file(path):
     return values
 
 
+_DEFAULT_R8_META = {
+    "options": {
+        "isObfuscationEnabled": True,
+        "isOptimizationsEnabled": True,
+        "isShrinkingEnabled": True,
+    },
+    "stats": {
+        "noObfuscationPercentage": 10.0,
+        "noOptimizationPercentage": 10.0,
+        "noShrinkingPercentage": 10.0,
+    },
+}
+
+
 def _build_signed_aab(
     target_path,
     keystore_path,
@@ -36,11 +50,23 @@ def _build_signed_aab(
     *,
     manifest_bytes=b"\x0a\x17com.maskarauder.micdrop",
     abi="arm64-v8a",
+    r8_meta=_DEFAULT_R8_META,
+    include_mapping=True,
 ):
     with zipfile.ZipFile(target_path, "w") as bundle:
         bundle.writestr("BundleConfig.pb", b"\x08\x01")
         bundle.writestr("base/manifest/AndroidManifest.xml", manifest_bytes)
         bundle.writestr(f"base/lib/{abi}/libjingle_peerconnection_so.so", b"\x7fELF-mock")
+        if r8_meta is not None:
+            bundle.writestr(
+                "BUNDLE-METADATA/com.android.tools/r8.json",
+                json.dumps(r8_meta).encode("utf-8"),
+            )
+        if include_mapping:
+            bundle.writestr(
+                "BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map",
+                b"com.maskarauder.micdrop.Foo -> a.a:\n",
+            )
     env = os.environ.copy()
     env["TEST_STOREPASS"] = store_password
     subprocess.run(
@@ -278,6 +304,67 @@ class AndroidSigningTest(unittest.TestCase):
             bundle.writestr("base/assets/injected.txt", b"unsigned")
         with self.assertRaisesRegex(RuntimeError, "unsigned"):
             android_signing.verify_aab(tampered_aab, expected_sha256=expected)
+
+    def test_verify_aab_rejects_unoptimized_or_unmapped_bundles(self):
+        ks = self.root / "r8-check.p12"
+        subprocess.run(
+            [
+                "keytool",
+                "-genkeypair",
+                "-keystore",
+                str(ks),
+                "-storetype",
+                "PKCS12",
+                "-alias",
+                "upload",
+                "-storepass",
+                "password123",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "365",
+                "-dname",
+                "CN=Test,O=Test,C=US",
+                "-noprompt",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        expected = android_signing.certificate_digest(ks, alias="upload", store_password="password123")
+
+        no_r8_aab = self.root / "no-r8.aab"
+        _build_signed_aab(no_r8_aab, ks, "password123", "upload", r8_meta=None)
+        with self.assertRaisesRegex(ValueError, "missing R8 metadata"):
+            android_signing.verify_aab(no_r8_aab, expected_sha256=expected)
+
+        low_obf_aab = self.root / "low-obf.aab"
+        _build_signed_aab(
+            low_obf_aab,
+            ks,
+            "password123",
+            "upload",
+            r8_meta={
+                "options": {
+                    "isObfuscationEnabled": True,
+                    "isOptimizationsEnabled": True,
+                    "isShrinkingEnabled": True,
+                },
+                "stats": {
+                    "noObfuscationPercentage": 80.0,
+                    "noOptimizationPercentage": 10.0,
+                    "noShrinkingPercentage": 10.0,
+                },
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "below Google Play's 25% minimum threshold"):
+            android_signing.verify_aab(low_obf_aab, expected_sha256=expected)
+
+        no_map_aab = self.root / "no-map.aab"
+        _build_signed_aab(no_map_aab, ks, "password123", "upload", include_mapping=False)
+        with self.assertRaisesRegex(ValueError, "missing non-empty R8 mapping file"):
+            android_signing.verify_aab(no_map_aab, expected_sha256=expected)
 
     def test_upload_play_executes_edits_bundle_track_commit_transaction(self):
         key_pem = self.root / "sa.pem"
