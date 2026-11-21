@@ -166,6 +166,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_ios_bundle.py' -v
           python -m unittest discover -s tools -p 'test_swiftpm_pins.py' -v
           python -m unittest discover -s tools -p 'test_ios_version.py' -v
+          python -m unittest discover -s tools -p 'test_app_store_screenshots.py' -v
           python -m unittest discover -s tools -p 'test_macos_app_bundle.py' -v
           python -m unittest discover -s tools -p 'test_package_unix_host.py' -v
           python -m unittest discover -s tools -p 'test_generate_apple_icons.py' -v

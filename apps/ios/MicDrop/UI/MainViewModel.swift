@@ -1229,4 +1229,11 @@ final class MainViewModel {
     private func focusInvitation() {
         invitationFocusRequest &+= 1
     }
+
+    #if DEBUG
+        /// Seeds a deterministic LAN discovery view for simulator App Store screenshots.
+        func applyScreenshotDiscovery(_ view: DiscoveryView) {
+            renderDiscovery(view)
+        }
+    #endif
 }
