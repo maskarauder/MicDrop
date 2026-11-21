@@ -1,0 +1,186 @@
+# SPDX-License-Identifier: MPL-2.0
+name: iPhone App Store screenshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      display_classes:
+        description: iPhone display classes to capture (all, iphone-6.3, or iphone-6.9)
+        type: choice
+        default: all
+        options:
+          - all
+          - iphone-6.3
+          - iphone-6.9
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-screenshots.yml'
+      - 'apps/ios/**'
+      - 'tools/*app_store_screenshots*'
+      - 'tools/capture_ios_screenshots.sh'
+      - 'internal/version/version.properties'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-screenshots.yml'
+      - 'apps/ios/**'
+      - 'tools/*app_store_screenshots*'
+      - 'tools/capture_ios_screenshots.sh'
+      - 'internal/version/version.properties'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+
+jobs:
+  screenshots:
+    name: Capture App Store iPhone screenshots
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MICDROP_BUNDLE_ID: com.maskarauder.micdrop
+      XCODE_RESOLVED: apps/ios/MicDrop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      DISPLAY_CLASSES: ${{ inputs.display_classes || 'all' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26+ and verify runner tools
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+            dev_dir=/Applications/Xcode_26.6.app/Contents/Developer
+          else
+            dev_dir=/Applications/Xcode.app/Contents/Developer
+          fi
+          export DEVELOPER_DIR="$dev_dir"
+          echo "DEVELOPER_DIR=$dev_dir" >> "$GITHUB_ENV"
+          sw_vers
+          xcodebuild -version
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+      - name: Validate App Store screenshot normalization and checks
+        run: python3 -m unittest discover -s tools -p 'test_app_store_screenshots.py' -v
+      - name: Check committed Swift package pins and notices
+        run: python3 tools/check_swiftpm_pins.py lock apps/ios/MicDropKit/Package.resolved third_party/ios-assets/ios-notices.txt
+      - name: Prepare build scratch directories
+        run: |
+          set -euo pipefail
+          cache="$RUNNER_TEMP/micdrop-ios-screenshots-build"
+          mkdir -p "$cache/dependency-archives" "$cache/SourcePackages" "$cache/DerivedData"
+          echo "MICDROP_IOS_CACHE=$cache" >> "$GITHUB_ENV"
+          mkdir -p .deps
+          if [ -e .deps/cache ] || [ -L .deps/cache ]; then
+            echo '::error::Checkout did not clear .deps/cache; inspect it before retrying.'
+            exit 1
+          fi
+          ln -s "$cache/dependency-archives" .deps/cache
+      - name: Fetch verified iOS WebRTC
+        run: python3 tools/fetch_webrtc.py ios
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION.zip"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $archive" | shasum -a 256 --check --strict
+          rm -rf "$RUNNER_TEMP/xcodegen"
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/xcodegen/bin/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Generate Xcode project
+        run: xcodegen generate --spec apps/ios/project.yml
+      - name: Use committed Swift package pins
+        run: |
+          mkdir -p "$(dirname "$XCODE_RESOLVED")"
+          cp apps/ios/MicDropKit/Package.resolved "$XCODE_RESOLVED"
+      - name: Resolve pinned Swift packages
+        run: >-
+          xcodebuild -resolvePackageDependencies
+          -project apps/ios/MicDrop.xcodeproj -scheme MicDrop
+          -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages"
+          -skipPackagePluginValidation -skipMacroValidation
+      - name: Verify Xcode package resolution
+        run: python3 tools/check_swiftpm_pins.py compare "$XCODE_RESOLVED" apps/ios/MicDropKit/Package.resolved
+      - name: Read shared release version
+        run: python3 tools/ios_version.py >> "$GITHUB_ENV"
+      - name: Build Debug iPhone simulator app
+        id: build_sim
+        run: |
+          set -uo pipefail
+          revision=local
+          if [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then revision="${GITHUB_SHA:0:12}"; fi
+          echo "MICDROP_REVISION=$revision" >> "$GITHUB_ENV"
+          sim_id="$(xcrun simctl list devices available -j | python3 tools/app_store_screenshots.py select-simulators --display-classes "$DISPLAY_CLASSES" --format tsv | cut -f2 | head -n 1)"
+          test -n "$sim_id"
+          mkdir -p build/ios
+          log=build/ios/xcodebuild-screenshots.log
+          status=0
+          xcodebuild build -quiet \
+            -project apps/ios/MicDrop.xcodeproj -scheme MicDrop -configuration Debug \
+            -destination "platform=iOS Simulator,id=$sim_id" \
+            -derivedDataPath "$MICDROP_IOS_CACHE/DerivedData" \
+            -clonedSourcePackagesDirPath "$MICDROP_IOS_CACHE/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            MARKETING_VERSION="$MICDROP_MARKETING_VERSION" CURRENT_PROJECT_VERSION="$MICDROP_BUILD_NUMBER" \
+            MICDROP_VERSION_NAME="$MICDROP_VERSION_NAME" \
+            MICDROP_REVISION="$revision" >"$log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::group::xcodebuild simulator output (last 150 lines)"
+            tail -n 150 "$log"
+            echo "::endgroup::"
+            grep -E 'error:|^ld: |Undefined symbol|duplicate symbol' "$log" | sort -u | head -n 200 || true
+            exit "$status"
+          fi
+          app="$MICDROP_IOS_CACHE/DerivedData/Build/Products/Debug-iphonesimulator/MicDrop.app"
+          test -d "$app"
+          echo "SIM_APP_PATH=$app" >> "$GITHUB_ENV"
+      - name: Capture and verify App Store iPhone screenshots
+        run: bash tools/capture_ios_screenshots.sh "$SIM_APP_PATH" build/ios/app-store-screenshots "$DISPLAY_CLASSES"
+      - name: Upload App Store 24-bit RGB iPhone screenshots
+        id: screenshots_artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-app-store-screenshots
+          path: build/ios/app-store-screenshots
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Summarize App Store screenshots
+        env:
+          ARTIFACT_URL: ${{ steps.screenshots_artifact.outputs.artifact-url }}
+        run: |
+          {
+            python3 tools/app_store_screenshots.py summary build/ios/app-store-screenshots --display-classes "$DISPLAY_CLASSES"
+            echo
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "[Download ios-app-store-screenshots]($ARTIFACT_URL)"
+              echo
+            fi
+            echo "Upload \`iphone-6.3/*.png\` to the required **iPhone with Dynamic Island (medium display)** slot in App Store Connect, and optionally \`iphone-6.9/*.png\` to the **iPhone with Dynamic Island (large display)** slot."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain screenshot diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-screenshots-failure-logs
+          path: |
+            build/ios/xcodebuild-screenshots.log
+            build/ios/app-store-screenshots/debug-timeout-*.png
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true

@@ -9,8 +9,17 @@
 import MicDropCore
 import SwiftUI
 
+private enum MainViewAnchor: Hashable {
+    case top
+    case status
+}
+
 struct MainView: View {
     @Bindable var model: MainViewModel
+    #if DEBUG
+    private let screenshotEnvironment: ScreenshotEnvironment?
+    @State private var screenshotPrepared = false
+    #endif
 
     @Environment(\.scenePhase) private var scenePhase
     @SceneStorage("section.connection") private var connectionExpanded = true
@@ -20,17 +29,26 @@ struct MainView: View {
     @SceneStorage("section.diagnostics") private var diagnosticsExpanded = false
     @FocusState private var invitationFocused: Bool
 
+    #if DEBUG
+    init(model: MainViewModel, screenshotEnvironment: ScreenshotEnvironment? = nil) {
+        self.model = model
+        self.screenshotEnvironment = screenshotEnvironment
+    }
+    #else
     init(model: MainViewModel) {
         self.model = model
     }
+    #endif
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 0) {
                     HeaderView()
+                        .id(MainViewAnchor.top)
                     StatusCardView(model: model)
                         .padding(.bottom, 8)
+                        .id(MainViewAnchor.status)
                     VStack(spacing: 12) {
                         SettingsSectionView(
                             .connection, summary: model.render.connectionSummary,
@@ -74,6 +92,49 @@ struct MainView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 16)
             }
+            #if DEBUG
+            .scrollIndicators(screenshotEnvironment == nil ? .automatic : .hidden)
+            .task(id: scenePhase) {
+                guard let screenshotEnvironment, scenePhase == .active, !screenshotPrepared else { return }
+                screenshotEnvironment.activateIfNeeded()
+                let scene = screenshotEnvironment.launch.scene
+                var noAnimation = Transaction()
+                noAnimation.disablesAnimations = true
+                withTransaction(noAnimation) {
+                    connectionExpanded = scene == .connection
+                    outputExpanded = scene == .connectedOutput
+                    microphoneExpanded = scene == .microphone
+                    advancedExpanded = false
+                    diagnosticsExpanded = scene == .diagnostics
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                withTransaction(noAnimation) {
+                    switch scene {
+                    case .connection:
+                        proxy.scrollTo(MainViewAnchor.top, anchor: .top)
+                    case .connectedOutput:
+                        proxy.scrollTo(MainViewAnchor.status, anchor: .top)
+                    case .microphone:
+                        proxy.scrollTo(SettingsSectionID.microphone, anchor: .top)
+                    case .diagnostics:
+                        proxy.scrollTo(SettingsSectionID.diagnostics, anchor: .top)
+                    }
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(350))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                screenshotPrepared = true
+                screenshotEnvironment.launch.writeReadyMarker()
+            }
+            #endif
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: model.sectionRequest) { _, request in
                 guard let request else { return }
