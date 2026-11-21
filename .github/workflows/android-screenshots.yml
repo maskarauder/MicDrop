@@ -10,6 +10,7 @@ on:
       - 'apps/android/**'
       - 'tools/*play_store_screenshots*'
       - 'tools/capture_emulator_screenshots.sh'
+      - 'tools/ci_sdkmanager_install.sh'
 
 permissions:
   contents: read
@@ -41,7 +42,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/.android"
           echo "ANDROID_USER_HOME=$RUNNER_TEMP/.android" >> "$GITHUB_ENV"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          bash tools/ci_sdkmanager_install.sh \
             "platforms;android-36" "build-tools;35.0.0" \
             "ndk;27.0.12077973" "platform-tools" "emulator"
       - name: Fetch verified Android WebRTC

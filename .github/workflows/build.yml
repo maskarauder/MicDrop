@@ -176,6 +176,7 @@ jobs:
           python -m unittest discover -s tools -p 'test_windows_signing.py' -v
           python -m unittest discover -s tools -p 'test_android_signing.py' -v
           python -m unittest discover -s tools -p 'test_ci_apt_install.py' -v
+          python -m unittest discover -s tools -p 'test_ci_sdkmanager_install.py' -v
           python tools/generate_apple_icons.py check
           python tools/play_store_graphics.py check
           python tools/play_store_screenshots.py check
@@ -766,7 +767,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/.android"
           echo "ANDROID_USER_HOME=$RUNNER_TEMP/.android" >> "$GITHUB_ENV"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0" "platform-tools" "emulator"
+          bash tools/ci_sdkmanager_install.sh "platforms;android-36" "build-tools;35.0.0" "platform-tools" "emulator"
       - name: Enable KVM permissions on Ubuntu runner
         run: |
           if [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
@@ -820,7 +821,7 @@ jobs:
           cache-disabled: true
       - name: Install pinned Android packages
         run: >-
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          bash tools/ci_sdkmanager_install.sh
           "platforms;android-36" "build-tools;35.0.0"
           "ndk;27.0.12077973"
       - name: Fetch verified Android WebRTC
