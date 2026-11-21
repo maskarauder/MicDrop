@@ -24,6 +24,7 @@ implementations, along with each platform's verified scope and remaining checks.
 
 - [Development](DEVELOPMENT.md): toolchains, source builds, CI workflows, developer harness and checks.
 - [Releasing](RELEASING.md): versioning, package contents, immutable drafts and tester delivery.
+- [Store publishing](STORE_PUBLISHING.md): Google Play and App Store build/signing setup, listing metadata and review notes.
 - [Windows security detections](WINDOWS_SECURITY.md): false-positive evidence, signing and scan limits.
 - [Licensing](LICENSING.md): MPL-2.0, source availability, notices and funding.
 - [Contributing](../CONTRIBUTING.md): contribution workflow, checks and engineering conventions.
