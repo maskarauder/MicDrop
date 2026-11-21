@@ -38,10 +38,10 @@ established by those results.
 - Complete physical iPhone route, locked-screen, remote/handoff, and desktop
   phone-settings device checks, plus wired/USB route validation across both
   mobile clients.
-- Add Google Play Store production Android signing/distribution and complete
-  public App Store / Play Store release review (Windows Authenticode signing,
-  Apple Developer ID signing/notarization, and iOS TestFlight signing are now
-  wired into CI).
+- Complete public App Store / Play Store release review; see
+  [store publishing](STORE_PUBLISHING.md) (Windows Authenticode signing, Apple
+  Developer ID signing/notarization, iOS TestFlight signing, and the signed Play
+  `.aab` with its gated upload are now wired into CI).
 - Obtain independent security review and broader device/latency measurements
   before making wider compatibility or performance claims.
 

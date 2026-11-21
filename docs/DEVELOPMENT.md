@@ -38,7 +38,7 @@ shared C++ tone diagnostics remain available across Windows, Linux, and macOS.
 | SwiftPM packages | Exact versions in `apps/ios/MicDropKit/Package.swift`; pins in its `Package.resolved`; see [iPhone provenance](../third_party/IOS.md) |
 | WebRTC distribution | Shiguredo m155.8059.1.1 Windows / m155.8059.2.0 Linux, macOS, Android, and iPhone; checksummed assets in the lock file |
 | Windows Authenticode signing | Microsoft `SignTool` (`Microsoft.Windows.SDK.BuildTools` `10.0.28000.2957`) + `Azure.CodeSigning.Dlib` (`Microsoft.ArtifactSigning.Client` `1.0.146`), pinned by SHA-256 in `tools/windows_signing.py` |
-| Dependency fetcher | Python 3.11+ |
+| Python tools (dependency fetcher, packaging, signing, release checks) | Python 3.11+ |
 
 These are selected compatible versions, not a claim that they are the newest.
 The Gradle/AGP/JDK/SDK combination follows the
@@ -682,6 +682,14 @@ release bundles (`windows-x64-harness-retained`, `windows-x64-installer-retained
 `android-apk-retained`, and `ios-ipa-retained`) containing `manifest.json` and
 `SHA256SUMS` so [draft release assembly](RELEASING.md) can promote exact verified
 packages across ephemeral GitHub-hosted VMs.
+
+The scripts in `tools/` and their tests need Python 3.11 or newer (they use
+`hashlib.file_digest`); the Android signing tests also need a JDK's `keytool` and
+`jarsigner` on `PATH`. CI runs the test modules one by one; locally, run them all with:
+
+```sh
+python -m unittest discover -s tools -p 'test_*.py' -v
+```
 
 Device playback and physical latency checks remain manual. Workflow actions are
 pinned to immutable commits. Runner compiler and CMake versions are recorded in
