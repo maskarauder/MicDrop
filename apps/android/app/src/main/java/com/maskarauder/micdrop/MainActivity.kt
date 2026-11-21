@@ -44,6 +44,9 @@ open class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var audioManager: AudioManager
     private lateinit var focusRequest: AudioFocusRequest
+    private lateinit var scrollView: ScrollView
+    private lateinit var contentLayout: LinearLayout
+    private lateinit var statusCard: LinearLayout
     private lateinit var statusView: TextView
     private lateinit var statusTitle: TextView
     private lateinit var diagnosticsView: TextView
@@ -300,7 +303,7 @@ open class MainActivity : ComponentActivity() {
                 insets
             }
         }
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { contentLayout = it }
         content.addView(TextView(this).apply {
             setText(R.string.title); textSize = 28f
             setTextColor(getColor(R.color.accent))
@@ -312,7 +315,7 @@ open class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             background = getDrawable(R.drawable.settings_card)
             setPadding(dp(14), dp(12), dp(14), dp(12))
-        }
+        }.also { statusCard = it }
         statusTitle = TextView(this).apply {
             textSize = 18f; setTextColor(getColor(R.color.accent))
             isAccessibilityHeading = true
@@ -528,9 +531,10 @@ open class MainActivity : ComponentActivity() {
             addView(button(R.string.privacy_policy) { openPrivacyPolicy() })
         }
         content.addView(sections)
-        root.addView(ScrollView(this).apply {
+        scrollView = ScrollView(this).apply {
             isFillViewport = true; addView(content)
-        }, 0, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        root.addView(scrollView, 0, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         root.requestApplyInsets()
     }
@@ -745,6 +749,184 @@ open class MainActivity : ComponentActivity() {
             else -> return "invalid_command"
         }
         return "ok"
+    }
+
+    internal fun debugScreenshotReady(): Boolean {
+        check(BuildConfig.DEBUG)
+        return screenResumed && screenVisible && playback != null && microphone != null &&
+            receivedSavedView && !savedState.working &&
+            receivedSessionView && receivedMicrophoneView &&
+            scrollView.height > 0 && contentLayout.height > 0
+    }
+
+    internal fun applyDebugScreenshotScene(scene: String) {
+        check(BuildConfig.DEBUG)
+        connectionToast?.cancel(); connectionToast = null
+        stopLocalPlayback()
+        lanDiscovery.detach()
+        currentFocus?.clearFocus()
+        scrollView.isVerticalScrollBarEnabled = false
+        invitationInput.text.clear()
+        scanStatusView.text = ""
+        idleMessage = null
+        pendingConnect = false
+        pendingMicrophoneText = null; microphonePermissionReady = false
+        pendingOutputPermission = null; outputPermissionReady = false
+        pendingInputChoice = null; inputChoiceReady = false
+
+        val pairedSummary = "Paired Windows: 192.168.1.42:8443\n" +
+            "Saved for this phone. Connect uses the audio and microphone options below."
+        savedState = SavedConnectionView(pairedSummary, available = true, present = true, working = false, paired = true)
+        savedView.text = savedState.message
+
+        selectedOutput = OutputSelection(); rememberedOutput = selectedOutput
+        selectedMicrophone = MicrophoneSelection(); rememberedInput = selectedMicrophone
+        preferences = AppAudioSettings.selectOutput(this, selectedOutput)
+        preferences = AppAudioSettings.selectInput(this, selectedMicrophone)
+        preferences = AppAudioSettings.update(this) {
+            it.copy(outputEnabled = true, microphoneEnabled = true,
+                echoCancellation = true, noiseReduction = true,
+                fastRecovery = true, keepMicrophoneActive = false)
+        }
+        runCatching {
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (maxVolume > 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, ((maxVolume * 3 + 2) / 4).coerceIn(1, maxVolume), 0)
+            }
+        }
+
+        sessionView = SessionView()
+        microphoneView = MicrophoneView()
+        showingMicrophone = false
+        localBaseline = null
+        latestDiagnostics = null
+        discoveryView = DiscoveryView()
+        discoveryStatusView.text = ""
+        discoveryButton.setText(R.string.find_windows)
+        discoveryList.removeAllViews()
+
+        connectionSection.expand(scene == "connection")
+        outputSection.expand(scene == "connected_output")
+        microphoneSection.expand(scene == "microphone")
+        advancedSection.expand(false)
+        diagnosticsSection.expand(scene == "diagnostics")
+
+        when (scene) {
+            "connection" -> {
+                renderDiscovery(DiscoveryView(
+                    searching = false,
+                    message = "Found 1 Windows host on your local network.",
+                    hosts = listOf(DiscoveredHost("192.168.1.42", 8443,
+                        "8a4f2c91e03bd715a6c40289f1b374e28a4f2c91e03bd715a6c40289f1b374e2"))
+                ))
+            }
+            "connected_output" -> {
+                showingMicrophone = true
+                microphoneView = MicrophoneView(
+                    session = SessionView(
+                        phase = SessionPhase.PLAYING,
+                        message = "Streaming desktop audio and microphone.",
+                        destination = "Windows: 192.168.1.42:8443",
+                        outputEnabled = true,
+                        outputSelection = OutputSelection(),
+                        networkStatus = "Network: Wi-Fi"
+                    ),
+                    muted = false,
+                    changing = false,
+                    mode = StreamMode.DUPLEX,
+                    input = MicrophoneSelection()
+                )
+                updateControls()
+            }
+            "microphone" -> {
+                updateControls()
+                microphoneInputButton.text = getString(R.string.selected_microphone, "Built-in phone microphone")
+            }
+            "diagnostics" -> {
+                val baseline = OutputSnapshot(
+                    backend = "local_audiotrack",
+                    capturedUptimeMs = 18420L,
+                    route = "phone speaker",
+                    trackGeneration = 1,
+                    routeChanges = 0,
+                    sampleRateHz = 48000,
+                    channels = 2,
+                    bufferFrames = 192,
+                    capacityFrames = 960,
+                    underruns = 0,
+                    performanceMode = "low latency",
+                    timestampAgeMs = 1.8,
+                    estimatedQueueMs = 6.2
+                )
+                localBaseline = baseline
+                val report = "Local output baseline · phone uptime ${baseline.capturedUptimeMs} ms\n" +
+                    getString(R.string.local_output_instructions) + "\n" + baseline.text()
+                latestDiagnostics = report
+                updateControls()
+                connectButton.isEnabled = false
+                localButton.isEnabled = false
+                scanButton.isEnabled = false
+                discoveryButton.isEnabled = false
+                forgetButton.isEnabled = false
+                addressButton.isEnabled = false
+                invitationInput.isEnabled = false
+                outputEnabled.isEnabled = false
+                outputDeviceButton.isEnabled = false
+                outputSettingsButton.isEnabled = false
+                microphoneEnabled.isEnabled = false
+                microphoneInputButton.isEnabled = false
+                stopButton.isEnabled = true
+                clickButton.visibility = android.view.View.VISIBLE
+                clickButton.isEnabled = true
+                copyButton.isEnabled = true
+                statusTitle.text = "Local audio test"
+                statusView.text = getString(R.string.local_output_status)
+                diagnosticsView.text = report
+            }
+            else -> error("Unknown screenshot scene: $scene")
+        }
+    }
+
+    internal fun finalizeDebugScreenshotScene(scene: String) {
+        check(BuildConfig.DEBUG)
+        connectionToast?.cancel(); connectionToast = null
+        currentFocus?.clearFocus()
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+            ?.hideSoftInputFromWindow(window.decorView.windowToken, 0)
+        if (scene == "microphone") {
+            microphoneInputButton.text = getString(R.string.selected_microphone, "Built-in phone microphone")
+        }
+        fun rectInContent(view: android.view.View): android.graphics.Rect {
+            val rect = android.graphics.Rect(0, 0, view.width, view.height)
+            contentLayout.offsetDescendantRectToMyCoords(view, rect)
+            return rect
+        }
+        val viewport = scrollView.height
+        val maxScroll = (contentLayout.height - viewport).coerceAtLeast(0)
+        val rawScrollY = when (scene) {
+            "connection" -> 0
+            "connected_output", "microphone", "diagnostics" -> {
+                val targetView = when (scene) {
+                    "connected_output" -> outputSection
+                    "microphone" -> microphoneSection
+                    else -> diagnosticsSection
+                }
+                val targetRect = rectInContent(targetView)
+                if (targetRect.bottom <= viewport) {
+                    0
+                } else {
+                    val anchors = listOf(statusCard, connectionSection, outputSection,
+                        microphoneSection, advancedSection, diagnosticsSection)
+                    val candidates = anchors.take(anchors.indexOf(targetView) + 1)
+                    val fittingAnchor = candidates.firstOrNull { anchor ->
+                        targetRect.bottom - rectInContent(anchor).top <= viewport
+                    }
+                    fittingAnchor?.let { rectInContent(it).top } ?: targetRect.top
+                }
+            }
+            else -> error("Unknown screenshot scene: $scene")
+        }
+        scrollView.scrollTo(0, rawScrollY.coerceIn(0, maxScroll))
     }
 
     private fun connectSelected() {

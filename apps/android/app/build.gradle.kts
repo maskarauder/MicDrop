@@ -19,15 +19,23 @@ android {
   ndkVersion = "27.0.12077973"
   buildFeatures { buildConfig = true }
 
+  val emulatorScreenshots = providers.gradleProperty("micdropEmulatorScreenshots").orNull == "true"
+
   defaultConfig {
     applicationId = "com.maskarauder.micdrop"
     minSdk = 31
     targetSdk = 36
     versionCode = micdropVersionCode
     versionName = micdropVersion
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     val revision = System.getenv("GITHUB_SHA")?.takeIf { it.matches(Regex("[0-9a-f]{40}")) }?.take(12) ?: "local"
     buildConfigField("String", "REVISION", "\"$revision\"")
-    ndk { abiFilters += "arm64-v8a" }
+    if (!emulatorScreenshots) {
+      ndk { abiFilters += "arm64-v8a" }
+    }
+  }
+  if (emulatorScreenshots) {
+    packaging { jniLibs { excludes += "**/*.so" } }
   }
   signingConfigs.getByName("debug") {
     System.getenv("MICDROP_DEBUG_KEYSTORE")?.let { path ->
@@ -98,4 +106,6 @@ dependencies {
   implementation("androidx.media3:media3-session:1.11.1")
   implementation(files("../../../.deps/webrtc/android/libwebrtc.aar"))
   testImplementation("junit:junit:4.13.2")
+  androidTestImplementation("androidx.test.ext:junit:1.3.0")
+  androidTestImplementation("androidx.test:runner:1.7.0")
 }
