@@ -322,6 +322,44 @@ def verify_aab(aab_path, expected_sha256=None):
         if b"AdbControlActivity" in manifest_bytes or b"ADB_CONTROL" in manifest_bytes:
             raise ValueError("Release AAB manifest leaked debug-only AdbControlActivity")
 
+        r8_meta_entry = "BUNDLE-METADATA/com.android.tools/r8.json"
+        if r8_meta_entry not in names:
+            raise ValueError(
+                "Release AAB is missing R8 metadata (BUNDLE-METADATA/com.android.tools/r8.json); "
+                "ensure isMinifyEnabled = true"
+            )
+        try:
+            r8_meta = json.loads(bundle.read(r8_meta_entry).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("Release AAB contains unreadable R8 metadata (r8.json)") from exc
+        if not isinstance(r8_meta, dict):
+            raise ValueError("Release AAB R8 metadata (r8.json) must be a JSON object")
+        r8_options = r8_meta.get("options") or {}
+        for flag in ("isObfuscationEnabled", "isOptimizationsEnabled", "isShrinkingEnabled"):
+            if r8_options.get(flag) is not True:
+                raise ValueError(f"Release AAB R8 metadata reports {flag} is not enabled")
+        r8_stats = r8_meta.get("stats") or {}
+        for stat_key, label in (
+            ("noObfuscationPercentage", "obfuscation"),
+            ("noOptimizationPercentage", "optimization"),
+            ("noShrinkingPercentage", "shrinking"),
+        ):
+            unoptimized_pct = r8_stats.get(stat_key)
+            if isinstance(unoptimized_pct, bool) or not isinstance(unoptimized_pct, (int, float)):
+                raise ValueError(f"Release AAB R8 metadata is missing numeric stats.{stat_key}")
+            if unoptimized_pct > 75.0:
+                raise ValueError(
+                    f"Release AAB DEX {label} coverage ({100.0 - unoptimized_pct:.2f}%) "
+                    "is below Google Play's 25% minimum threshold"
+                )
+
+        mapping_entry = "BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map"
+        if mapping_entry not in names or bundle.getinfo(mapping_entry).file_size == 0:
+            raise ValueError(
+                "Release AAB is missing non-empty R8 mapping file "
+                "(BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map)"
+            )
+
         native_libs = [
             name
             for name in names

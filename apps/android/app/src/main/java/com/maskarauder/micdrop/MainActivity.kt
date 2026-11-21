@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -31,6 +32,8 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.zxing.client.android.Intents
 import com.journeyapps.barcodescanner.ScanContract
@@ -242,6 +245,10 @@ open class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) { stopLocalPlayback() }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
         latestDiagnostics = StoredReports.stream(this)
         audioManager = getSystemService(AudioManager::class.java)
@@ -285,7 +292,9 @@ open class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(spacing, spacing, spacing, spacing)
             setOnApplyWindowInsetsListener { view, insets ->
-                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
+                val bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime()
+                )
                 view.setPadding(spacing + bars.left, spacing + bars.top,
                     spacing + bars.right, spacing + bars.bottom)
                 insets
@@ -523,6 +532,7 @@ open class MainActivity : ComponentActivity() {
             isFillViewport = true; addView(content)
         }, 0, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        root.requestApplyInsets()
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -641,9 +651,10 @@ open class MainActivity : ComponentActivity() {
             showConnectionNotice(R.string.scan_camera_unavailable)
             return
         }
-        // CaptureActivity requests CAMERA only when opened, pauses its camera
+        // QrCaptureActivity requests CAMERA only when opened, pauses its camera
         // on background/rotation, and never saves a frame with this option off.
-        val options = ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        val options = ScanOptions().setCaptureActivity(QrCaptureActivity::class.java)
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             .setPrompt(getString(R.string.scan_prompt)).setOrientationLocked(false)
             .setBeepEnabled(false).setBarcodeImageEnabled(false)
             .addExtra(Intents.Scan.SCAN_TYPE, Intents.Scan.MIXED_SCAN)

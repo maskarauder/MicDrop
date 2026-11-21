@@ -32,8 +32,12 @@
     android:supportsRtl="true"
     android:theme="@style/Theme.MicDrop">
     <activity android:name="com.journeyapps.barcodescanner.CaptureActivity"
-      android:exported="false" android:screenOrientation="fullSensor"
-      tools:replace="android:screenOrientation" />
+      tools:node="remove" />
+    <activity android:name=".QrCaptureActivity"
+      android:clearTaskOnLaunch="true"
+      android:exported="false"
+      android:stateNotNeeded="true"
+      android:windowSoftInputMode="stateAlwaysHidden" />
     <service android:name=".PlaybackService" android:exported="true"
       android:foregroundServiceType="mediaPlayback" android:stopWithTask="false">
       <intent-filter>
